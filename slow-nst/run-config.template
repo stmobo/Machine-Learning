@@ -1,0 +1,8 @@
+image_size=[512,512]
+outfile=/mnt/disks/nst-disk/output/runN.png
+
+content_loss_weight=8e-2
+
+vgg_19_checkpoint=/mnt/disks/nst-disk/vgg_19.ckpt
+logdir=/mnt/disks/nst-disk/log/runN
+interim_file_template=/mnt/disks/nst-disk/intermediate-imgs/runN/runN_
