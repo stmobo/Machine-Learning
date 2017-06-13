@@ -7,7 +7,7 @@ def training_parameters(parser):
     parser.add_argument('batch-size', type=int, default=16, help='Image batch size to use for training')
     parser.add_argument('input-queue-capacity', type=int, default=1000, help='Number of images to prefetch for the input queue')
     parser.add_argument('input-threads', type=int, default=4, help='Number of threads to use for input prefetching')
-    parser.add_argument('dsc-steps', type=int, default=1, help='Number of discriminator training steps to run for every generator training step')
+    parser.add_argument('dsc-steps', type=int, default=1, help='Number of discriminator / critic training steps to run for every generator training step')
 
     parser.add_argument('checkpoint-dir', help='Directory to write checkpoint files to')
     parser.add_argument('log-dir', help='Directory to write log files to')
@@ -51,16 +51,19 @@ def sample_pipeline(args):
         shared_name='matched-input-queue'
     )
 
-    shuffled_tags = tf.random_shuffle(sample_tags)
-    dsc_mismatch_label = tf.random_uniform([], minval=0.0, maxval=0.3)
-    mismatched_batch = tf.train.batch(
-        [sample_images, shuffled_tags, dsc_mismatch_label]
-        enqueue_many=True,
-        batch_size=args.batch_size,
-        capacity=args.input_queue_capacity,
-        num_threads=args.input_threads,
-        shared_name='mismatched-input-queue'
-    )
+    if not args.wasserstein:
+        shuffled_tags = tf.random_shuffle(sample_tags)
+        dsc_mismatch_label = tf.random_uniform([], minval=0.0, maxval=0.3)
+        mismatched_batch = tf.train.batch(
+            [sample_images, shuffled_tags, dsc_mismatch_label]
+            enqueue_many=True,
+            batch_size=args.batch_size,
+            capacity=args.input_queue_capacity,
+            num_threads=args.input_threads,
+            shared_name='mismatched-input-queue'
+        )
+    else:
+        mismatched_batch = None
 
     sample_batch = (sample_images, sample_tags, sample_labels)
 
@@ -68,7 +71,7 @@ def sample_pipeline(args):
     # and must fall within the range [0, 1]
     noise_batch = tf.truncated_normal([args.batch_size, args.z_size], mean=0.5, stddev=0.25)
 
-    return sample_batch, mismatched_batch, noise_batch
+    return sample_batch, noise_batch, mismatched_batch
 
 def training_step(args, sess, summary_writer, wnet):
     for dsc_step in range(args.dsc_steps):
@@ -79,7 +82,7 @@ def training_step(args, sess, summary_writer, wnet):
     summary_writer.add_summary(gen_summary)
 
 def do_training(args):
-    sample_batch, mismatch_batch, noise_batch = sample_pipeline(args)
+    sample_batch, noise_batch, mismatch_batch  = sample_pipeline(args)
     wnet = waifunet.waifunet(args, noise_batch, sample_batch[1], sample_batch, mismatch_batch)
 
     summ_writer = tf.summary.FileWriter(

@@ -45,6 +45,7 @@ def waifunet_parameters(parser):
     parser.add_argument('beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
 
     parser.add_argument('gen-use-lrelu', action='store_true', help='Generator network uses Leaky ReLU activations in place of standard ReLU')
+    parser.add_argument('wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
 
     return parser
 
@@ -83,46 +84,19 @@ class waifunet(object):
             self.dsc_fake_out = self.discriminator(self.gen_out, labels_in)
 
         with tf.variable_scope('discriminator', reuse=True):
-            self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1])
-            self.dsc_mismatch_out = self.discriminator(mismatched_batch[0], mismatched_batch[1])
+            self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1
+            if not args.wasserstein:
+                self.dsc_mismatch_out = self.discriminator(mismatched_batch[0], mismatched_batch[1])
 
-        # Discriminator outputs probability that sample came from training dataset
-        batch_size = tf.shape(self.dsc_fake_out)[0]
-        self.dsc_fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_fake_out,
-            labels=tf.random_uniform([batch_size], minval=0.0, maxval=0.3),#tf.zeros_like(self.dsc_fake_out),
-            name='discriminator-fake-loss'
-        ))
+        if args.wasserstein:
+            self.wasserstein_gan_loss(sample_batch)
+        else:
+            self.standard_gan_loss(sample_batch, mismatched_batch)
 
-        tf.summary.scalar('Discriminator Fake Loss', self.dsc_fake_loss, collections=['dsc-summaries'])
-
-        self.dsc_sample_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_sample_out,
-            labels=sample_batch[2],
-            name='discriminator-sample-loss'
-        ))
-
-        tf.summary.scalar('Discriminator Real Loss', self.dsc_sample_loss, collections=['dsc-summaries'])
-
-        self.dsc_mismatch_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_mismatch_out,
-            labels=mismatched_batch[2],
-            name='discriminator-mismatch-loss'
-        ))
-
-        tf.summary.scalar('Discriminator Mismatched Loss', self.dsc_mismatch_loss, collections=['dsc-summaries'])
-
-        # NOTE: maybe also add image total variation to generator loss?
-        self.gen_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_fake_out,
-            labels=tf.random_uniform([batch_size], minval=0.7, maxval=1.2),#tf.ones_like(self.dsc_fake_out),
-            name='generator-loss'
-        ))
+        # self.dsc_loss now contains discriminator / critic network loss tensor
+        # self.gen_loss now contains generator network loss tensor
 
         tf.summary.scalar('Generator Loss', self.gen_loss, collections=['gen-summaries'])
-
-        self.dsc_loss = self.dsc_fake_loss + self.dsc_sample_loss + self.dsc_mismatch_loss
-
         tf.summary.scalar('Discriminator Loss', self.dsc_loss, collections=['dsc-summaries'])
 
         self.gen_vars = slim.get_variables(scope='generator')
@@ -148,6 +122,49 @@ class waifunet(object):
 
         self.gen_summaries = tf.summary.merge_all(key='gen-summaries')
         self.dsc_summaries = tf.summary.merge_all(key='dsc-summaries')
+
+    def wasserstein_gan_loss(self, sample_batch):
+        critic_real_mean = tf.reduce_mean(self.dsc_sample_out)
+        critic_fake_mean = tf.reduce_mean(self.dsc_fake_out)
+
+        self.dsc_loss = critic_real_mean - critic_fake_mean
+        self.gen_loss = critic_fake_mean
+
+    def standard_gan_loss(self, sample_batch, mismatched_batch):
+        # Discriminator outputs probability that sample came from training dataset
+        batch_size = tf.shape(self.dsc_fake_out)[0]
+        self.dsc_fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=self.dsc_fake_out,
+            labels=tf.random_uniform([self.args.batch_size], minval=0.0, maxval=0.3),#tf.zeros_like(self.dsc_fake_out),
+            name='discriminator-fake-loss'
+        ))
+
+        tf.summary.scalar('Discriminator Fake Loss', self.dsc_fake_loss, collections=['dsc-summaries'])
+
+        self.dsc_sample_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=self.dsc_sample_out,
+            labels=sample_batch[2],
+            name='discriminator-sample-loss'
+        ))
+
+        tf.summary.scalar('Discriminator Real Loss', self.dsc_sample_loss, collections=['dsc-summaries'])
+
+        self.dsc_mismatch_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=self.dsc_mismatch_out,
+            labels=mismatched_batch[2],
+            name='discriminator-mismatch-loss'
+        ))
+
+        tf.summary.scalar('Discriminator Mismatched Loss', self.dsc_mismatch_loss, collections=['dsc-summaries'])
+
+        # NOTE: maybe also add image total variation to generator loss?
+        self.gen_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=self.dsc_fake_out,
+            labels=tf.random_uniform([self.args.batch_size], minval=0.7, maxval=1.2),#tf.ones_like(self.dsc_fake_out),
+            name='generator-loss'
+        ))
+
+        self.dsc_loss = self.dsc_fake_loss + self.dsc_sample_loss + self.dsc_mismatch_loss
 
     def gen_activation_fn(self):
         if self.args.gen_use_lrelu:
