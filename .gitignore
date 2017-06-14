@@ -109,3 +109,4 @@ slow-nst/input
 *.png
 *.jpg
 *.ini
+logs/
