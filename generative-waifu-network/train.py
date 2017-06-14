@@ -3,17 +3,22 @@ import numpy as np
 import waifunet
 import configargparse
 
+import sys
+
 def training_parameters(parser):
     parser.add_argument('batch-size', type=int, default=16, help='Image batch size to use for training')
     parser.add_argument('input-queue-capacity', type=int, default=1000, help='Number of images to prefetch for the input queue')
     parser.add_argument('input-threads', type=int, default=4, help='Number of threads to use for input prefetching')
     parser.add_argument('dsc-steps', type=int, default=1, help='Number of discriminator / critic training steps to run for every generator training step')
 
+    parser.add_argument('input-filenames', action='append', help='Globs matching input TFRecord files')
     parser.add_argument('checkpoint-dir', help='Directory to write checkpoint files to')
     parser.add_argument('log-dir', help='Directory to write log files to')
 
+    parser.add_argument('summary-frequency', type=int, default=20, help='How often (in generator training iterations) to output summary info')
+
 def sample_pipeline(args):
-    filename_queue = tf.train.string_input_producer(tf.train.match_filenames_once(args.content_image, name='input-filenames'), name='filename-producer')
+    filename_queue = tf.train.string_input_producer(tf.train.match_filenames_once(args.input_filenames, name='input-filenames'), name='filename-producer')
     imreader = tf.TFRecordReader(name='image-reader')
 
     _, serialized_example = imreader.read(filename_queue)
@@ -73,16 +78,27 @@ def sample_pipeline(args):
 
     return sample_batch, noise_batch, mismatched_batch
 
-def training_step(args, sess, summary_writer, wnet):
-    for dsc_step in range(args.dsc_steps):
-        _, dsc_summary = sess.run([wnet.dsc_train, wnet.self.dsc_summaries])
-        summary_writer.add_summary(dsc_summary)
+def training_step(args, sess, summary_writer, wnet, global_step):
+    write_summary = (global_step % args.summary_frequency == 0)
 
-    _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries])
-    summary_writer.add_summary(gen_summary)
+    for dsc_step in range(args.dsc_steps):
+        if write_summary:
+            _, dsc_summary = sess.run([wnet.dsc_train, wnet.self.dsc_summaries])
+            summary_writer.add_summary(dsc_summary, global_step=global_step)
+        else:
+            sess.run(wnet.dsc_train)
+
+    if write_summary:
+        _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries])
+        summary_writer.add_summary(gen_summary, global_step=global_step)
+    else:
+        sess.run(wnet.gen_train)
 
 def do_training(args):
-    sample_batch, noise_batch, mismatch_batch  = sample_pipeline(args)
+    print("Creating input pipeline...")
+    sys.stdout.flush()
+
+    sample_batch, noise_batch, mismatch_batch = sample_pipeline(args)
     wnet = waifunet.waifunet(args, noise_batch, sample_batch[1], sample_batch, mismatch_batch)
 
     summ_writer = tf.summary.FileWriter(
@@ -94,8 +110,10 @@ def do_training(args):
         checkpoint_dir=args.checkpoint_dir,
         save_summaries_steps=None,
     ) as mon_sess:
+        step = 0
         while not mon_sess.should_stop():
-            training_step(args, mon_sess, summ_writer, wnet)
+            training_step(args, mon_sess, summ_writer, wnet, step)
+            step += 1
 
 if __name__ == '__main__':
     parser = configargparse.ArgumentParser(description='Performs training for the WaifuNet.')

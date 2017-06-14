@@ -41,11 +41,14 @@ def waifunet_parameters(parser):
     parser.add_argument('dsc-filter-base', type=int, default=64, help='Initial number of input filters for discriminator network')
     parser.add_argument('dsc-layers', type=int, default=5, help='Number of conv layers in discriminator network (not including output flattening + sigmoid FC output layer)')
 
+    # Alternately: 5e-5 for Wasserstein GANs
     parser.add_argument('learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
     parser.add_argument('beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
 
     parser.add_argument('gen-use-lrelu', action='store_true', help='Generator network uses Leaky ReLU activations in place of standard ReLU')
+
     parser.add_argument('wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
+    parser.add_argument('dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
 
     return parser
 
@@ -74,22 +77,32 @@ class waifunet(object):
         # Both sample_batch and mismatched_batch are tensor tuples of form:
         # (normalized_image, tags, smoothed_discriminator_labels)
 
+        print("[WaifuNet] Creating generator...")
+        sys.stdout.flush()
+
         with tf.variable_scope('generator'):
             self.gen_out = self.generator(noise_in, labels_in)
 
             self.gen_img_out = gen_image_processing(self.gen_out)
             tf.summary.image('Generated Images', self.gen_img_out, collections=['gen-summaries'])
 
+        print("[WaifuNet] Creating discriminator (generated images)...")
+        sys.stdout.flush()
         with tf.variable_scope('discriminator'):
             self.dsc_fake_out = self.discriminator(self.gen_out, labels_in)
 
+        print("[WaifuNet] Creating discriminator (sampled images)...")
+        sys.stdout.flush()
         with tf.variable_scope('discriminator', reuse=True):
-            self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1
+            self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1])
             if not args.wasserstein:
+                print("[WaifuNet] Creating discriminator (mismatched images)...")
+                sys.stdout.flush()
+
                 self.dsc_mismatch_out = self.discriminator(mismatched_batch[0], mismatched_batch[1])
 
         if args.wasserstein:
-            self.wasserstein_gan_loss(sample_batch)
+            self.wasserstein_gan_loss()
         else:
             self.standard_gan_loss(sample_batch, mismatched_batch)
 
@@ -102,8 +115,21 @@ class waifunet(object):
         self.gen_vars = slim.get_variables(scope='generator')
         self.dsc_vars = slim.get_variables(scope='discriminator')
 
-        dsc_optimizer = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1)
-        gen_optimizer = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1)
+        if not args.wasserstein:
+            print("[WaifuNet] Creating standard optimizer (Adam) ops...")
+            sys.stdout.flush()
+
+            dsc_optimizer = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1)
+            gen_optimizer = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1)
+        else:
+            print("[WaifuNet] Creating Wasserstein optimizer (RMSProp) ops...")
+            sys.stdout.flush()
+
+            dsc_optimizer = tf.train.RMSPropOptimizer(args.learning_rate)
+            gen_optimizer = tf.train.RMSPropOptimizer(args.learning_rate)
+
+        print("[WaifuNet] Creating gradient compute / apply ops...")
+        sys.stdout.flush()
 
         dsc_gv = dsc_optimizer.compute_gradients(self.dsc_loss, var_list=self.dsc_vars)
         gen_gv = gen_optimizer.compute_gradients(self.gen_loss, var_list=self.gen_vars)
@@ -114,16 +140,30 @@ class waifunet(object):
         tf.summary.scalar('Mean Discriminator Gradients', dsc_mean_grads, collections=['dsc-summaries'])
         tf.summary.scalar('Mean Generator Gradients', gen_mean_grads, collections=['gen-summaries'])
 
-        self.dsc_train = dsc_optimizer.apply_gradients(dsc_gv)
-        self.gen_train = gen_optimizer.apply_gradients(gen_gv)
+        global_step = tf.contrib.framework.get_or_create_global_step()
 
-        #self.dsc_train = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1).minimize(self.dsc_loss, var_list=self.dsc_vars)
-        #self.gen_train = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1).minimize(self.gen_loss, var_list=self.gen_vars)
+        dsc_apply_grads = dsc_optimizer.apply_gradients(dsc_gv, global_step=global_step)
+        self.gen_train = gen_optimizer.apply_gradients(gen_gv, global_step=global_step)
+
+        if args.wasserstein:
+            print("[WaifuNet] Creating Wasserstein critic network weight clipping ops...")
+            sys.stdout.flush()
+
+            # add ops to clip the critic/discriminator network weights-- this must happen AFTER weights are updated
+            with tf.control_dependencies([dsc_apply_grads]):
+                clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in self.dsc_vars]
+                weight_clip_op = tf.group(*clipped_weights)
+                self.dsc_train = weight_clip_op
+        else:
+            self.dsc_train = dsc_apply_grads
 
         self.gen_summaries = tf.summary.merge_all(key='gen-summaries')
         self.dsc_summaries = tf.summary.merge_all(key='dsc-summaries')
 
-    def wasserstein_gan_loss(self, sample_batch):
+    def wasserstein_gan_loss(self):
+        print("[WaifuNet] Creating Wasserstein GAN loss ops...")
+        sys.stdout.flush()
+
         critic_real_mean = tf.reduce_mean(self.dsc_sample_out)
         critic_fake_mean = tf.reduce_mean(self.dsc_fake_out)
 
@@ -131,6 +171,9 @@ class waifunet(object):
         self.gen_loss = critic_fake_mean
 
     def standard_gan_loss(self, sample_batch, mismatched_batch):
+        print("[WaifuNet] Creating standard GAN loss ops...")
+        sys.stdout.flush()
+
         # Discriminator outputs probability that sample came from training dataset
         batch_size = tf.shape(self.dsc_fake_out)[0]
         self.dsc_fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
