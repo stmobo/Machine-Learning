@@ -6,16 +6,16 @@ import configargparse
 import sys
 
 def training_parameters(parser):
-    parser.add_argument('batch-size', type=int, default=16, help='Image batch size to use for training')
-    parser.add_argument('input-queue-capacity', type=int, default=1000, help='Number of images to prefetch for the input queue')
-    parser.add_argument('input-threads', type=int, default=4, help='Number of threads to use for input prefetching')
-    parser.add_argument('dsc-steps', type=int, default=1, help='Number of discriminator / critic training steps to run for every generator training step')
+    parser.add_argument('--batch-size', type=int, default=16, help='Image batch size to use for training')
+    parser.add_argument('--input-queue-capacity', type=int, default=1000, help='Number of images to prefetch for the input queue')
+    parser.add_argument('--input-threads', type=int, default=4, help='Number of threads to use for input prefetching')
+    parser.add_argument('--dsc-steps', type=int, default=1, help='Number of discriminator / critic training steps to run for every generator training step')
 
-    parser.add_argument('input-filenames', action='append', help='Globs matching input TFRecord files')
-    parser.add_argument('checkpoint-dir', help='Directory to write checkpoint files to')
-    parser.add_argument('log-dir', help='Directory to write log files to')
+    parser.add_argument('--input-filenames', action='append', help='Globs matching input TFRecord files')
+    parser.add_argument('--checkpoint-dir', help='Directory to write checkpoint files to')
+    parser.add_argument('--log-dir', help='Directory to write log files to')
 
-    parser.add_argument('summary-frequency', type=int, default=20, help='How often (in generator training iterations) to output summary info')
+    parser.add_argument('--summary-frequency', type=int, default=20, help='How often (in generator training iterations) to output summary info')
 
 def sample_pipeline(args):
     filename_queue = tf.train.string_input_producer(tf.train.match_filenames_once(args.input_filenames, name='input-filenames'), name='filename-producer')
@@ -25,23 +25,26 @@ def sample_pipeline(args):
     example = tf.parse_single_example(
         serialized_example,
         features={
-            'image': tf.VarLenFeature(tf.string),
-            'tags': tf.FixedLenFeature([args.label_size], tf.uint8)
+            'image': tf.FixedLenFeature(shape=[], dtype=tf.string),
+            'tags': tf.FixedLenFeature(shape=[], dtype=tf.string),
         }
     )
+
+    tags_8u = tf.decode_raw(example['tags'], tf.uint8)
+    tags_8u = tf.reshape(tags_8u, [args.label_size])
 
     im_8u = tf.image.decode_image(example['image'], channels=3)
     im_f32 = tf.image.convert_image_dtype(im_8u, tf.float32)
 
     # Resize all images to match the generator's output dimensions
-    img_resized = tf.image.resize_bicubic(img_f32, (args.output_height, args.output_width))
-    img_resized = tf.reshape(imdata, [args.output_height, args.output_width, 3])
+    img_resized = tf.image.resize_bicubic(im_f32, (args.output_height, args.output_width))
+    img_resized = tf.reshape(img_resized, [args.output_height, args.output_width, 3])
 
     # Scale all image values from range [0,1] to range [-1, 1] (same as TanH)
     img_out = (img_resized * 2.0) - 1.0
 
     # Convert tags to float tensors
-    tags_f32 = tf.to_float32(example['tags'])
+    tags_f32 = tf.to_float(example['tags'])
 
     # label smoothing
     dsc_label = tf.random_uniform([], minval=0.7, maxval=1.2)
@@ -60,7 +63,7 @@ def sample_pipeline(args):
         shuffled_tags = tf.random_shuffle(sample_tags)
         dsc_mismatch_label = tf.random_uniform([], minval=0.0, maxval=0.3)
         mismatched_batch = tf.train.batch(
-            [sample_images, shuffled_tags, dsc_mismatch_label]
+            [sample_images, shuffled_tags, dsc_mismatch_label],
             enqueue_many=True,
             batch_size=args.batch_size,
             capacity=args.input_queue_capacity,
@@ -106,6 +109,9 @@ def do_training(args):
         graph=tf.get_default_graph()
     )
 
+    # Debugging only!
+    return # return early-- don't try to launch the graph
+
     with tf.train.MonitoredTrainingSession(
         checkpoint_dir=args.checkpoint_dir,
         save_summaries_steps=None,
@@ -120,7 +126,7 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--config', is_config_file=True, help='Configuration file path')
 
     waifunet.waifunet_parameters(parser)
-    add_training_args(parser)
+    training_parameters(parser)
 
     args = parser.parse_args()
 

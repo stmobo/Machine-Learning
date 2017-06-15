@@ -1,8 +1,8 @@
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-
 import numpy as np
-import scipy as sp
+
+import sys
 
 def conv_output_size(dim_in, stride):
     return int(math.ceil(float(dim_in) / float(stride)))
@@ -30,25 +30,25 @@ def gen_image_processing(gan_out):
     return img_8u
 
 def waifunet_parameters(parser):
-    parser.add_argument('z-size', type=int, default=256, help='Dimensionality of Z (noise) vectors')
-    parser.add_argument('label-size', type=int, default=1000, help='Dimensionality of Y (tag) vectors')
-    parser.add_argument('output-height', type=int, default=1024, help='Height of output images')
-    parser.add_argument('output-width', type=int, default=1024, help='Width of output images')
-    parser.add_argument('gen-filter-base', type=int, default=64, help='Final (base) number of generator deconv filters (before image output layer)')
-    parser.add_argument('gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
-    parser.add_argument('gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
-    parser.add_argument('dsc-kernel-size', type=int, default=5, help='Height+Width of discriminator conv layer kernels')
-    parser.add_argument('dsc-filter-base', type=int, default=64, help='Initial number of input filters for discriminator network')
-    parser.add_argument('dsc-layers', type=int, default=5, help='Number of conv layers in discriminator network (not including output flattening + sigmoid FC output layer)')
+    parser.add_argument('--z-size', type=int, default=256, help='Dimensionality of Z (noise) vectors')
+    parser.add_argument('--label-size', type=int, default=1000, help='Dimensionality of Y (tag) vectors')
+    parser.add_argument('--output-height', type=int, default=1024, help='Height of output images')
+    parser.add_argument('--output-width', type=int, default=1024, help='Width of output images')
+    parser.add_argument('--gen-filter-base', type=int, default=64, help='Final (base) number of generator deconv filters (before image output layer)')
+    parser.add_argument('--gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
+    parser.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
+    parser.add_argument('--dsc-kernel-size', type=int, default=5, help='Height+Width of discriminator conv layer kernels')
+    parser.add_argument('--dsc-filter-base', type=int, default=64, help='Initial number of input filters for discriminator network')
+    parser.add_argument('--dsc-layers', type=int, default=5, help='Number of conv layers in discriminator network (not including output flattening + sigmoid FC output layer)')
 
     # Alternately: 5e-5 for Wasserstein GANs
-    parser.add_argument('learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
-    parser.add_argument('beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
+    parser.add_argument('--learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
+    parser.add_argument('--beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
 
-    parser.add_argument('gen-use-lrelu', action='store_true', help='Generator network uses Leaky ReLU activations in place of standard ReLU')
+    parser.add_argument('--gen-use-lrelu', action='store_true', help='Generator network uses Leaky ReLU activations in place of standard ReLU')
 
-    parser.add_argument('wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
-    parser.add_argument('dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
+    parser.add_argument('--wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
+    parser.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
 
     return parser
 
@@ -215,6 +215,35 @@ class waifunet(object):
         else:
             return tf.nn.relu
 
+    def deception_module(self, tensor_in, output_depth, bottleneck_depth, name='Deception'):
+        batch_size, layer_height, layer_width, layer_depth = tf.shape(tensor_in)
+        output_height, output_width = layer_height * 2, layer_width * 2
+        head_depth = output_depth // 4
+
+        with tf.variable_scope(name):
+            with slim.arg_scope([slim.conv2d, slim.conv2d_transpose], activation_fn=self.gen_activation_fn()):
+                # 1x1 bottleneck layers + initial scaling
+                head_3x3 = slim.conv2d(tensor_in, bottleneck_depth, kernel_size=1, name='Bottleneck_3x3')
+                head_5x5 = slim.conv2d(tensor_in, bottleneck_depth, kernel_size=1, name='Bottleneck_5x5')
+                head_scale = tf.image.resize_nearest_neighbor(tensor_in, (output_height, output_width), name='Resize_2x')
+
+                # Transposed conv layers and scale head bottlenecking
+                head_1x1 = slim.conv2d_transpose(tensor_in, head_depth, kernel_size=1, stride=2, name='ConvT_1x1')
+                head_3x3 = slim.conv2d_transpose(head_3x3, head_depth, kernel_size=3, stride=2, name='ConvT_3x3')
+                head_5x5 = slim.conv2d_transpose(head_5x5, head_depth, kernel_size=5, stride=2, name='ConvT_5x5')
+                head_scale = slim.conv2d(head_scale, head_depth, kernel_size=1, name='Bottleneck_2x')
+
+                # Reshape and depth-concatenate heads
+                head_1x1 = tf.reshape(head_1x1, [batch_size, output_height, output_width, head_depth])
+                head_3x3 = tf.reshape(head_3x3, [batch_size, output_height, output_width, head_depth])
+                head_5x5 = tf.reshape(head_5x5, [batch_size, output_height, output_width, head_depth])
+                head_scale = tf.reshape(head_scale, [batch_size, output_height, output_width, head_depth])
+
+                out = tf.concat([head_1x1, head_3x3, head_5x5, head_scale], axis=3)
+                out = tf.reshape(out, [batch_size, output_height, output_width, output_depth])
+
+                return out
+
     # Z-vector: noise
     # Y-vector: tags / labels
     def generator(self, z, y):
@@ -292,10 +321,15 @@ class waifunet(object):
         net = tf.reshape(net, [-1, net_h, net_w, n_filters])
 
         net = tf.reshape(net, [batch_size, -1])
+        activation_fn = tf.sigmoid
+
+        if self.args.wasserstein:
+            activation_fn = None
+
         out = slim.fully_connected(
             net,
             1,
-            activation_fn=None #activation_fn=tf.sigmoid
+            activation_fn=activation_fn
         )
 
         return out
