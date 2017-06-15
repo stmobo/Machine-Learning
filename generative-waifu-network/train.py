@@ -109,9 +109,6 @@ def do_training(args):
         graph=tf.get_default_graph()
     )
 
-    # Debugging only!
-    return # return early-- don't try to launch the graph
-
     with tf.train.MonitoredTrainingSession(
         checkpoint_dir=args.checkpoint_dir,
         save_summaries_steps=None,
