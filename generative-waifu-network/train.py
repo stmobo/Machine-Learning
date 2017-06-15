@@ -44,7 +44,7 @@ def sample_pipeline(args):
     img_out = (img_resized * 2.0) - 1.0
 
     # Convert tags to float tensors
-    tags_f32 = tf.to_float(example['tags'])
+    tags_f32 = tf.to_float(tags_8u)
 
     # label smoothing
     dsc_label = tf.random_uniform([], minval=0.7, maxval=1.2)
