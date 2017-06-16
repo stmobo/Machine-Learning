@@ -114,6 +114,7 @@ def do_training(args):
         checkpoint_dir=args.checkpoint_dir,
         save_summaries_steps=None,
     ) as mon_sess:
+        print("Created session!")
         step = 0
         while not mon_sess.should_stop():
             training_step(args, mon_sess, summ_writer, wnet, step)
