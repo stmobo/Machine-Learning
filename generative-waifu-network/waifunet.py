@@ -84,29 +84,31 @@ class waifunet(object):
 
         # Both sample_batch and mismatched_batch are tensor tuples of form:
         # (normalized_image, tags, smoothed_discriminator_labels)
-        with tf.variable_scope('generator'):
-            debug_print("[WaifuNet] Creating generator...")
-            self.gen_out = self.generator(noise_in, labels_in)
+        # (also force the big variables onto CPU)
+        with slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0'):
+            with tf.variable_scope('generator'):
+                debug_print("[WaifuNet] Creating generator...")
+                self.gen_out = self.generator(noise_in, labels_in)
 
-            self.gen_img_out = gen_image_processing(self.gen_out)
-            tf.summary.image('Generated Images', self.gen_img_out, collections=['gen-summaries'])
+                self.gen_img_out = gen_image_processing(self.gen_out)
+                tf.summary.image('Generated Images', self.gen_img_out, collections=['gen-summaries'])
 
-        with tf.variable_scope('discriminator'):
-            debug_print("[WaifuNet] Creating discriminator (generated images)...")
-            self.dsc_fake_out = self.discriminator(self.gen_out, labels_in)
+            with tf.variable_scope('discriminator'):
+                debug_print("[WaifuNet] Creating discriminator (generated images)...")
+                self.dsc_fake_out = self.discriminator(self.gen_out, labels_in)
 
-            debug_print("[WaifuNet] Creating discriminator (sampled images)...")
-            self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1], reuse=True)
+                debug_print("[WaifuNet] Creating discriminator (sampled images)...")
+                self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1], reuse=True)
 
-        if not args.wasserstein:
-            debug_print("[WaifuNet] Creating discriminator (mismatched images)...")
+            if not args.wasserstein:
+                debug_print("[WaifuNet] Creating discriminator (mismatched images)...")
 
-            self.dsc_mismatch_out = self.discriminator(mismatched_batch[0], mismatched_batch[1], reuse=True)
+                self.dsc_mismatch_out = self.discriminator(mismatched_batch[0], mismatched_batch[1], reuse=True)
 
-        if args.wasserstein:
-            self.wasserstein_gan_loss()
-        else:
-            self.standard_gan_loss(sample_batch, mismatched_batch)
+            if args.wasserstein:
+                self.wasserstein_gan_loss()
+            else:
+                self.standard_gan_loss(sample_batch, mismatched_batch)
 
         # self.dsc_loss now contains discriminator / critic network loss tensor
         # self.gen_loss now contains generator network loss tensor
