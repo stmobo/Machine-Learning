@@ -107,7 +107,9 @@ def training_step(args, sess, summary_writer, wnet, global_step):
     if write_summary:
         _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries], options=run_opts, run_metadata=run_meta)
         summary_writer.add_summary(gen_summary, global_step=global_step)
+
         print("Completed step {}!".format(step))
+        sys.stdout.flush()
     else:
         sess.run(wnet.gen_train, options=run_opts, run_metadata=run_meta)
 
@@ -133,6 +135,7 @@ def do_training(args):
         save_summaries_steps=None,
     ) as mon_sess:
         print("Created session!")
+        sys.stdout.flush()
         step = 0
         while not mon_sess.should_stop():
             training_step(args, mon_sess, summ_writer, wnet, step)
