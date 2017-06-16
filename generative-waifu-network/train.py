@@ -108,7 +108,7 @@ def training_step(args, sess, summary_writer, wnet, global_step):
         _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries], options=run_opts, run_metadata=run_meta)
         summary_writer.add_summary(gen_summary, global_step=global_step)
 
-        print("Completed step {}!".format(step))
+        print("Completed step {}!".format(global_step))
         sys.stdout.flush()
     else:
         sess.run(wnet.gen_train, options=run_opts, run_metadata=run_meta)
