@@ -38,7 +38,7 @@ def sample_pipeline(args):
     im_f32 = tf.image.convert_image_dtype(im_8u, tf.float32)
 
     # Resize all images to match the generator's output dimensions
-    img_resized = tf.image.resize_bicubic(im_f32, (args.output_height, args.output_width))
+    img_resized = tf.image.resize_bicubic(tf.expand_dims(im_f32, axis=0), (args.output_height, args.output_width))
     img_resized = tf.reshape(img_resized, [args.output_height, args.output_width, 3])
 
     # Scale all image values from range [0,1] to range [-1, 1] (same as TanH)
