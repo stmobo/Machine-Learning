@@ -58,8 +58,6 @@ def waifunet_parameters(parser):
     parser.add_argument('--wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
     parser.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
 
-    parser.add_argument('--variables-on-cpu', action='store_true', help='If true, then model variables will be stored on CPU.')
-
     return parser
 
 class waifunet(object):
@@ -86,14 +84,7 @@ class waifunet(object):
 
         # Both sample_batch and mismatched_batch are tensor tuples of form:
         # (normalized_image, tags, smoothed_discriminator_labels)
-        if args.variables_on_cpu:
-            with slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0') as sc:
-                pass
-        else:
-            with slim.arg_scope([]) as sc:
-                pass
-
-        with slim.arg_scope(sc):
+        with slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0'):
             with tf.variable_scope('generator'):
                 debug_print("[WaifuNet] Creating generator...")
                 self.gen_out = self.generator(noise_in, labels_in)
