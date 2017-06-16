@@ -47,7 +47,7 @@ def waifunet_parameters(parser):
     parser.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
     parser.add_argument('--dsc-kernel-size', type=int, default=5, help='Height+Width of discriminator conv layer kernels')
     parser.add_argument('--dsc-filter-base', type=int, default=64, help='Initial number of input filters for discriminator network')
-    parser.add_argument('--dsc-layers', type=int, default=5, help='Number of conv layers in discriminator network (not including output flattening + sigmoid FC output layer)')
+    parser.add_argument('--dsc-layers', type=int, default=4, help='Number of conv layers in discriminator network (not including output flattening + sigmoid FC output layer)')
 
     # Alternately: 5e-5 for Wasserstein GANs
     parser.add_argument('--learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
