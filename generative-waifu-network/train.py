@@ -94,6 +94,7 @@ def training_step(args, sess, summary_writer, wnet, global_step):
     if write_summary:
         _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries])
         summary_writer.add_summary(gen_summary, global_step=global_step)
+        print("Completed step {}!".format(step))
     else:
         sess.run(wnet.gen_train)
 
