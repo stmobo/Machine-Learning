@@ -86,11 +86,12 @@ class waifunet(object):
 
         # Both sample_batch and mismatched_batch are tensor tuples of form:
         # (normalized_image, tags, smoothed_discriminator_labels)
-        sc = {}
         if args.variables_on_cpu:
-            sc = slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0')
+            with slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0') as sc:
+                pass
         else:
-            sc = slim.arg_scope([]) # empty arg scope
+            with slim.arg_scope([]) as sc:
+                pass
 
         with slim.arg_scope(sc):
             with tf.variable_scope('generator'):
