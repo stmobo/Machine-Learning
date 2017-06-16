@@ -115,6 +115,7 @@ def training_step(args, sess, summary_writer, wnet, global_step):
 
     if trace_sessions:
         summary_writer.add_run_metadata(run_meta, "step-{:d}-gen".format(global_step))
+        summary_writer.flush()
 
 
 
