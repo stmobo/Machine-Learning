@@ -16,6 +16,7 @@ def training_parameters(parser):
     parser.add_argument('--log-dir', help='Directory to write log files to')
 
     parser.add_argument('--summary-frequency', type=int, default=20, help='How often (in generator training iterations) to output summary info')
+    parser.add_argument('--trace-frequency', type=int, default=500, help='How often to trace session run info')
 
 def sample_pipeline(args):
     filename_queue = tf.train.string_input_producer(tf.train.match_filenames_once(args.input_filenames, name='input-filenames'), name='filename-producer')
@@ -83,20 +84,37 @@ def sample_pipeline(args):
 
 def training_step(args, sess, summary_writer, wnet, global_step):
     write_summary = (global_step % args.summary_frequency == 0)
+    trace_sessions = (global_step % args.trace_frequency == 0)
+
+    if trace_sessions:
+        run_meta = tf.RunMetadata()
+        run_opts = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    else:
+        run_meta = None
+        run_opts = None
 
     for dsc_step in range(args.dsc_steps):
         if write_summary:
-            _, dsc_summary = sess.run([wnet.dsc_train, wnet.self.dsc_summaries])
+            _, dsc_summary = sess.run([wnet.dsc_train, wnet.dsc_summaries], options=run_opts, run_metadata=run_meta)
             summary_writer.add_summary(dsc_summary, global_step=global_step)
         else:
-            sess.run(wnet.dsc_train)
+            sess.run(wnet.dsc_train, options=run_opts, run_metadata=run_meta)
+
+        if trace_sessions:
+            summary_writer.add_run_metadata(run_meta, "step-{:d}-d{:d}".format(global_step, dsc_step))
+            run_meta = tf.RunMetadata()
 
     if write_summary:
-        _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries])
+        _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries], options=run_opts, run_metadata=run_meta)
         summary_writer.add_summary(gen_summary, global_step=global_step)
         print("Completed step {}!".format(step))
     else:
-        sess.run(wnet.gen_train)
+        sess.run(wnet.gen_train, options=run_opts, run_metadata=run_meta)
+
+    if trace_sessions:
+        summary_writer.add_run_metadata(run_meta, "step-{:d}-gen".format(global_step))
+
+
 
 def do_training(args):
     print("Creating input pipeline...")
