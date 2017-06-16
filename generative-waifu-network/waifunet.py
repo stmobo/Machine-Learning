@@ -89,6 +89,8 @@ class waifunet(object):
         sc = {}
         if args.variables_on_cpu:
             sc = slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0')
+        else:
+            sc = slim.arg_scope([]) # empty arg scope
 
         with slim.arg_scope(sc):
             with tf.variable_scope('generator'):
