@@ -16,6 +16,7 @@ def training_parameters(parser):
     parser.add_argument('--log-dir', help='Directory to write log files to')
 
     parser.add_argument('--summary-frequency', type=int, default=20, help='How often (in generator training iterations) to output summary info')
+    parser.add_argument('--trace-frequency', type=int, default=500, help='How often to trace session run info')
 
 def sample_pipeline(args):
     filename_queue = tf.train.string_input_producer(tf.train.match_filenames_once(args.input_filenames, name='input-filenames'), name='filename-producer')
@@ -37,14 +38,14 @@ def sample_pipeline(args):
     im_f32 = tf.image.convert_image_dtype(im_8u, tf.float32)
 
     # Resize all images to match the generator's output dimensions
-    img_resized = tf.image.resize_bicubic(im_f32, (args.output_height, args.output_width))
+    img_resized = tf.image.resize_bicubic(tf.expand_dims(im_f32, axis=0), (args.output_height, args.output_width))
     img_resized = tf.reshape(img_resized, [args.output_height, args.output_width, 3])
 
     # Scale all image values from range [0,1] to range [-1, 1] (same as TanH)
     img_out = (img_resized * 2.0) - 1.0
 
     # Convert tags to float tensors
-    tags_f32 = tf.to_float(example['tags'])
+    tags_f32 = tf.to_float(tags_8u)
 
     # label smoothing
     dsc_label = tf.random_uniform([], minval=0.7, maxval=1.2)
@@ -83,19 +84,40 @@ def sample_pipeline(args):
 
 def training_step(args, sess, summary_writer, wnet, global_step):
     write_summary = (global_step % args.summary_frequency == 0)
+    trace_sessions = (global_step % args.trace_frequency == 0)
+
+    if trace_sessions:
+        run_meta = tf.RunMetadata()
+        run_opts = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    else:
+        run_meta = None
+        run_opts = None
 
     for dsc_step in range(args.dsc_steps):
         if write_summary:
-            _, dsc_summary = sess.run([wnet.dsc_train, wnet.self.dsc_summaries])
+            _, dsc_summary = sess.run([wnet.dsc_train, wnet.dsc_summaries], options=run_opts, run_metadata=run_meta)
             summary_writer.add_summary(dsc_summary, global_step=global_step)
         else:
-            sess.run(wnet.dsc_train)
+            sess.run(wnet.dsc_train, options=run_opts, run_metadata=run_meta)
+
+        if trace_sessions:
+            summary_writer.add_run_metadata(run_meta, "step-{:d}-d{:d}".format(global_step, dsc_step))
+            run_meta = tf.RunMetadata()
 
     if write_summary:
-        _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries])
+        _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries], options=run_opts, run_metadata=run_meta)
         summary_writer.add_summary(gen_summary, global_step=global_step)
     else:
-        sess.run(wnet.gen_train)
+        sess.run(wnet.gen_train, options=run_opts, run_metadata=run_meta)
+
+    print("Completed step {}!".format(global_step))
+    sys.stdout.flush()
+
+    if trace_sessions:
+        summary_writer.add_run_metadata(run_meta, "step-{:d}-gen".format(global_step))
+        summary_writer.flush()
+
+
 
 def do_training(args):
     print("Creating input pipeline...")
@@ -109,13 +131,12 @@ def do_training(args):
         graph=tf.get_default_graph()
     )
 
-    # Debugging only!
-    return # return early-- don't try to launch the graph
-
     with tf.train.MonitoredTrainingSession(
         checkpoint_dir=args.checkpoint_dir,
         save_summaries_steps=None,
     ) as mon_sess:
+        print("Created session!")
+        sys.stdout.flush()
         step = 0
         while not mon_sess.should_stop():
             training_step(args, mon_sess, summ_writer, wnet, step)
