@@ -127,13 +127,11 @@ def precompute_gram_matrices(args, filenames, session_target=''):
 # Outputs:
 # - transformed_content: The image transform network to use for training.
 # - total_loss: The overall loss to use for training.
-def build_training_network(args, content_input, style_gram_matrices, style_image_weights):
+def build_training_network(args, content_input, style_gram_matrices, style_image_weights, reuse=False):
     print("Building main compute graph...")
     sys.stdout.flush()
 
-    transformed_content = image_transform_net.transform_net(content_input, args)
-
-    tf.summary.image('Transform Network Output', transformed_content, max_outputs=1)
+    transformed_content = image_transform_net.transform_net(content_input, args, reuse=reuse)
 
     # Add ops to compute losses:
 
@@ -158,7 +156,7 @@ def build_training_network(args, content_input, style_gram_matrices, style_image
     original_content_layers = tf.slice(content_layer, [batch_sz,0,0,0],[-1,-1,-1,-1])
 
     batched_content_loss = losses.content_loss(original_content_layers, transformed_content_layers)
-    #batched_content_loss *= args.content_loss_weight
+    batched_content_loss *= args.content_loss_weight
 
     # Subcomponents of overall style loss
     style_loss_components = []
@@ -171,17 +169,9 @@ def build_training_network(args, content_input, style_gram_matrices, style_image
         style_loss_components.append(style_losses)
 
     content_loss = tf.reduce_sum(batched_content_loss)
-    variation_loss = tf.reduce_sum(tf.image.total_variation(transformed_content)) * args.variation_loss_weight
     style_loss = tf.reduce_sum(style_loss_components)
 
-    total_loss = content_loss + variation_loss + style_loss
-
-    tf.summary.scalar('Variation Loss', variation_loss)
-    tf.summary.scalar('Content Loss', content_loss)
-    tf.summary.scalar('Style Loss', style_loss)
-    tf.summary.scalar('Total Loss', total_loss)
-
-    return transformed_content, total_loss
+    return transformed_content, content_loss, style_loss
 
 # Builds ops for the input pipeline:
 def build_input_ops(args):
@@ -245,6 +235,69 @@ def build_auxillary_ops(args, is_chief, loss):
 
     return train_step, scaffold, hooks, chief_hooks, summary_writer
 
+# 'losses' is actually a list of (deviceSpec, lossTensor) pairs
+def multigpu_auxillary_ops(args, losses):
+    # Model Save/Load:
+    transform_model_vars = image_transform_net.network_parameters(args)
+    transform_model_saver = tf.train.Saver(transform_model_vars)
+
+    # Optimization ops
+    global_step = framework.get_or_create_global_step()
+
+    optimizer = tf.train.AdamOptimizer(
+        learning_rate=args.learning_rate,
+        epsilon=args.adam_epsilon
+    )
+
+    # compute gradients on each tower
+    tower_gvs = []
+    tower_losses = []
+    for device, loss in losses:
+        with tf.device(device):
+            grads_and_vars = optimizer.compute_gradients(loss, var_list=transform_model_vars)
+            tower_gvs.append(grads_and_vars)
+        tower_losses.append(loss)
+
+    grads = {} # dict mapping variables to gradients
+
+    for tower in tower_gvs:
+        for grad, var in tower:
+            grad = tf.expand_dims(grad, 0) # create a 'tower' dimension
+            if var in grads:
+                grads[var].append(grad)
+            else:
+                grads[var] = [grad]
+
+    with tf.device('/cpu:0'):
+        applied_gradients = []
+        for var, tower_grads in grads.items():
+            tower_grads = tf.concat(tower_grads, axis=0)   # 5D-tensor (shape [tower, batch, height, width, depth])
+            avg_grad = tf.reduce_mean(tower_grads, axis=0) # 4D-tensor (tower dimension removed)
+            applied_gradients.append( (avg_grad, var) )
+
+        train_step = optimizer.apply_gradients(applied_gradients, global_step=global_step)
+        avg_loss = tf.reduce_mean(tower_losses)
+
+        tf.summary.scalar('Total Loss', avg_loss)
+
+    #train_step = optimizer.minimize(loss, global_step, transform_model_vars)
+    scaffold = tf.train.Scaffold(saver=transform_model_saver)
+
+    summary_writer = tf.summary.FileWriter(args.logdir + '-{}-{}'.format(args.job, args.task_index), tf.get_default_graph(), flush_secs=15)
+
+    hooks = [
+        tf.train.NanTensorHook(avg_loss),
+        tf.train.SummarySaverHook(save_secs=args.summary_save_frequency, scaffold=scaffold, summary_writer=summary_writer),
+    ]
+
+
+    chief_hooks=[
+        tf.train.CheckpointSaverHook(args.checkpoint_dir, save_secs=600, scaffold=scaffold),
+        tf.train.StepCounterHook(summary_writer=summary_writer),
+    ]
+
+    return train_step, scaffold, hooks, chief_hooks, summary_writer
+
 # Runs precompute and builds the model + aux. ops.
 # Can be run in a tf.Device context if necessary.
 def setup_training(args, is_chief=True, server=None, cluster=None):
@@ -274,6 +327,8 @@ def setup_training(args, is_chief=True, server=None, cluster=None):
             cluster=cluster,
             worker_device='/job:worker/task:{:d}'.format(args.task_index)
         )
+    else:
+        input_device = '/cpu:0'
 
     with tf.device(precompute_device):
         gram_matrices, vgg_saver = precompute_gram_matrices(args, style_image_paths, session_target)
@@ -281,9 +336,61 @@ def setup_training(args, is_chief=True, server=None, cluster=None):
     with tf.device(input_device):
         train_input = build_input_ops(args)
 
-    with tf.device(compute_device):
-        transform_out, loss = build_training_network(args, train_input, gram_matrices, style_image_weights)
-        train_step, scaffold, hooks, chief_hooks, summary_writer = build_auxillary_ops(args, is_chief, loss)
+    if args.n_gpus <= 1:
+        # No or single-GPU case:
+        with tf.device(compute_device):
+            transform_out, content_loss, style_loss = build_training_network(args, train_input, gram_matrices, style_image_weights)
+
+            variation_loss = tf.reduce_sum(tf.image.total_variation(transform_out)) * args.variation_loss_weight
+            loss = content_loss + style_loss + variation_loss
+
+            tf.summary.scalar('Content Loss', content_loss)
+            tf.summary.scalar('Variation Loss', variation_loss)
+            tf.summary.scalar('Style Loss', style_loss)
+            tf.summary.scalar('Total Loss', loss)
+            tf.summary.image('Transform Network Output', transform_out, max_outputs=3)
+
+            train_step, scaffold, hooks, chief_hooks, summary_writer = build_auxillary_ops(args, is_chief, loss)
+    else:
+        # Multi-GPU training:
+        per_gpu_losses = []
+
+        per_gpu_content_losses = []
+        per_gpu_style_losses = []
+        per_gpu_variation_losses = []
+        per_gpu_total_losses = []
+
+        per_gpu_transforms = []
+
+        for gpu_id in range(args.n_gpus):
+            device = '/gpu:{:d}'.format(gpu_id)
+            with tf.device(device):
+                reuse=True
+                if gpu_id == 0:
+                    reuse=False
+                transform_out, content_loss, style_loss = build_training_network(args, train_input, gram_matrices, style_image_weights, reuse=reuse)
+                per_gpu_style_losses.append(style_loss)
+                per_gpu_content_losses.append(content_loss)
+
+            # compute variation loss on CPU:
+            variation_loss = tf.reduce_sum(tf.image.total_variation(transform_out)) * args.variation_loss_weight
+            per_gpu_variation_losses.append(variation_loss)
+            loss = content_loss + style_loss + variation_loss
+
+            per_gpu_total_losses.append(loss)
+            per_gpu_losses.append( (device, loss) )
+            per_gpu_transforms.append(transform_out)
+
+        tf.summary.scalar('Content Loss', tf.reduce_mean(per_gpu_content_losses))
+        tf.summary.scalar('Variation Loss', tf.reduce_mean(per_gpu_variation_losses))
+        tf.summary.scalar('Style Loss', tf.reduce_mean(per_gpu_style_losses))
+        tf.summary.scalar('Total Loss', tf.reduce_mean(per_gpu_total_losses))
+
+        # concatentate per-tower transform outputs along batch dimension
+        all_transforms_out = tf.concat(per_gpu_transforms, axis=0)
+        tf.summary.image('Transform Network Output', all_transforms_out, max_outputs=3)
+
+        train_step, scaffold, hooks, chief_hooks, summary_writer = multigpu_auxillary_ops(args, per_gpu_losses)
 
     return train_step, scaffold, hooks, chief_hooks, summary_writer, vgg_saver
 
@@ -311,3 +418,5 @@ def add_training_args(parser):
     parser.add_argument('--batch-size', type=int, default=10, help='Training batch size.')
     parser.add_argument('--training-epochs', type=int, default=None, help='Number of training epochs to perform')
     parser.add_argument('--input-threads', type=int, default=4, help='Number of threads for input prefetching.')
+
+    parser.add_argument('--n-gpus', type=int, default=0, help='Number of GPUs available on this system')

@@ -73,6 +73,8 @@ if args.training:
         save_checkpoint_secs=None,
     ) as mon_sess:
         training.init_vgg_model(args, mon_sess, vgg_saver)
+        ckpt_path = tf.train.latest_checkpoint(args.checkpoint_dir)
+        scaffold.saver.restore(mon_sess, ckpt_path)
 
         print('Beginning training...')
         sys.stdout.flush()

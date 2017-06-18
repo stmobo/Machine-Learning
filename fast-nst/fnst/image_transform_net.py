@@ -102,8 +102,8 @@ def network_parameters(args):
 # Builds the image transformation network graph.
 # The image input tensor (image_in) should be 4D w/ shape [batch, height, width, channels].
 # The output tensor is of the same shape.
-def transform_net(image_in, args):
-    with tf.variable_scope(args.network_scope):
+def transform_net(image_in, args, reuse=False):
+    with tf.variable_scope(args.network_scope, reuse=reuse):
         net = input_block(image_in, args)
 
         for res_block_i in range(args.n_res_blocks):
