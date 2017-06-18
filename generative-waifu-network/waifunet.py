@@ -53,7 +53,8 @@ def waifunet_parameters(parser):
     parser.add_argument('--learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
     parser.add_argument('--beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
 
-    parser.add_argument('--gen-use-lrelu', action='store_true', help='Generator network uses Leaky ReLU activations in place of standard ReLU')
+    parser.add_argument('--generator-activation', default='lrelu', help='Activation function to use within the generator network (valid values are \'relu\', \'lrelu\', \'selu\')')
+    parser.add_argument('--discriminator-activation', default='lrelu', help='Activation function to use within the discrimnator network (same values as --generator-activation)')
 
     parser.add_argument('--wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
     parser.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')

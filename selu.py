@@ -30,3 +30,13 @@ def alpha_dropout(tensor_in, drop_rate=0.05, lm=1.0507, al=1.6733):
 
 # Also: Initialize weights from a gaussian distribution
 # With mean 0 and variance 1/n (where n = number of parameters)
+def initializer(shape, dtype=tf.float32, partition_info=None):
+    shape_list = shape.as_list()
+    n = 1 # number of units
+    for dim in shape_list:
+        n *= dim
+
+    # return gaussian distribution, with
+    # E(w_i) = 0
+    # Var(w_i) = 1/n
+    return tf.random_normal(shape, mean=0.0, stddev=np.sqrt(np.reciprocal(n)))
