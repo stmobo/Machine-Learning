@@ -4,6 +4,9 @@ import numpy as np
 import math
 import sys
 
+from generator_network import *
+from discriminator_network import *
+
 def debug_print(line):
     print(line)
     sys.stdout.flush()
@@ -42,22 +45,10 @@ def waifunet_parameters(parser):
     parser.add_argument('--label-size', type=int, default=1000, help='Dimensionality of Y (tag) vectors')
     parser.add_argument('--output-height', type=int, default=1024, help='Height of output images')
     parser.add_argument('--output-width', type=int, default=1024, help='Width of output images')
-    parser.add_argument('--gen-filter-base', type=int, default=64, help='Final (base) number of generator deconv filters (before image output layer)')
-    parser.add_argument('--gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
-    parser.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
-    parser.add_argument('--dsc-kernel-size', type=int, default=5, help='Height+Width of discriminator conv layer kernels')
-    parser.add_argument('--dsc-filter-base', type=int, default=64, help='Initial number of input filters for discriminator network')
-    parser.add_argument('--dsc-layers', type=int, default=4, help='Number of conv layers in discriminator network (not including output flattening + sigmoid FC output layer)')
 
     # Alternately: 5e-5 for Wasserstein GANs
     parser.add_argument('--learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
     parser.add_argument('--beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
-
-    parser.add_argument('--generator-activation', default='lrelu', help='Activation function to use within the generator network (valid values are \'relu\', \'lrelu\', \'selu\')')
-    parser.add_argument('--discriminator-activation', default='lrelu', help='Activation function to use within the discrimnator network (same values as --generator-activation)')
-
-    parser.add_argument('--wasserstein', action='store_true', help='Use Wasserstein distance for optimization')
-    parser.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
 
     return parser
 
@@ -83,267 +74,221 @@ class waifunet(object):
     def __init__(self, args, noise_in, labels_in, sample_batch, mismatched_batch): #labels_in, sample_images_in, sample_labels_in, dsc_labels_in):
         self.args = args
 
-        # Both sample_batch and mismatched_batch are tensor tuples of form:
-        # (normalized_image, tags, smoothed_discriminator_labels)
-        with slim.arg_scope([slim.variable, slim.model_variable], device='/cpu:0'):
-            with tf.variable_scope('generator'):
-                debug_print("[WaifuNet] Creating generator...")
-                self.gen_out = self.generator(noise_in, labels_in)
+        self.noise = noise_in
+        self.labels = labels_in
+        self.samples = sample_batch
+        self.mismatched = mismatched_batch
 
-                self.gen_img_out = gen_image_processing(self.gen_out)
-                tf.summary.image('Generated Images', self.gen_img_out, collections=['gen-summaries'])
+        self.optimizer = tf.train.RMSPropOptimizer(learning_rate=args.learning_rate)
 
-            with tf.variable_scope('discriminator'):
-                debug_print("[WaifuNet] Creating discriminator (generated images)...")
-                self.dsc_fake_out = self.discriminator(self.gen_out, labels_in)
-
-                debug_print("[WaifuNet] Creating discriminator (sampled images)...")
-                self.dsc_sample_out = self.discriminator(sample_batch[0], sample_batch[1], reuse=True)
-
-            if not args.wasserstein:
-                debug_print("[WaifuNet] Creating discriminator (mismatched images)...")
-
-                self.dsc_mismatch_out = self.discriminator(mismatched_batch[0], mismatched_batch[1], reuse=True)
-
-            if args.wasserstein:
-                self.wasserstein_gan_loss()
-            else:
-                self.standard_gan_loss(sample_batch, mismatched_batch)
-
-        # self.dsc_loss now contains discriminator / critic network loss tensor
-        # self.gen_loss now contains generator network loss tensor
-
-        tf.summary.scalar('Generator Loss', self.gen_loss, collections=['gen-summaries'])
-        tf.summary.scalar('Discriminator Loss', self.dsc_loss, collections=['dsc-summaries'])
-
-        self.gen_vars = slim.get_trainable_variables(scope='generator')
-        self.dsc_vars = slim.get_trainable_variables(scope='discriminator')
-
-        if not args.wasserstein:
-            debug_print("[WaifuNet] Creating standard optimizer (Adam) ops...")
-
-            dsc_optimizer = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1)
-            gen_optimizer = tf.train.AdamOptimizer(args.learning_rate, beta1=args.beta1)
+    def gen_training_step(self, sess, summaries=False, trace=False):
+        if trace:
+            run_meta = tf.RunMetadata()
+            run_opts = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
         else:
-            debug_print("[WaifuNet] Creating Wasserstein optimizer (RMSProp) ops...")
+            run_meta = None
+            run_opts = None
 
-            dsc_optimizer = tf.train.RMSPropOptimizer(args.learning_rate)
-            gen_optimizer = tf.train.RMSPropOptimizer(args.learning_rate)
+        if summaries:
+            _, gen_summary = sess.run([self.gen_train, self.gen_summaries], options=run_opts, run_metadata=run_meta)
+        else:
+            gen_summary = None
+            sess.run(self.gen_train, options=run_opts, run_metadata=run_meta)
 
-        debug_print("[WaifuNet] Creating gradient compute / apply ops...")
+        return gen_summary, run_meta
 
-        dsc_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='discriminator')
-        gen_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='generator')
+    def dsc_training_step(self, sess, summaries=False, trace=False):
+        if trace:
+            run_meta = tf.RunMetadata()
+            run_opts = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+        else:
+            run_meta = None
+            run_opts = None
 
-        with tf.control_dependencies(gen_update_ops):
-            gen_gv = gen_optimizer.compute_gradients(self.gen_loss, var_list=self.gen_vars)
+        if summaries:
+            _, dsc_summary = sess.run([self.dsc_train, self.dsc_summaries], options=run_opts, run_metadata=run_meta)
+        else:
+            dsc_summary = None
+            sess.run(self.dsc_train, options=run_opts, run_metadata=run_meta)
 
-        with tf.control_dependencies(dsc_update_ops):
-            dsc_gv = dsc_optimizer.compute_gradients(self.dsc_loss, var_list=self.dsc_vars)
+        return dsc_summary, run_meta
 
-        for grad, var in dsc_gv:
-            if grad is None:
-                print("Gradient for {} is None!".format(var.name))
+    # Network outputs:
+    # self.dsc_train: Performs a single discriminator network training step when evaluated.
+    # self.gen_train: Performs a single generator network training steps when evaluated.
+    # self.dsc_summaries: Returns a merged summary tensor for a discriminator training step.
+    # self.gen_summaries: Returns a merged summary tensor for a generator training step; includes images.
+    # self.gen_images: Returns the generated images from the generator network (for each tower)
+    def build(self):
+        if self.args.n_gpus <= 1:
+            # Single-tower
+            self.single_tower_gradients()
+        else:
+            self.multi_tower_gradients()
 
-        for grad, var in gen_gv:
-            if grad is None:
-                print("Gradient for {} is None!".format(var.name))
+        self.training_ops()
+        self.summary_ops()
 
-        dsc_mean_grads = tf.reduce_mean([tf.reduce_mean(grad) for grad, var in dsc_gv])
-        gen_mean_grads = tf.reduce_mean([tf.reduce_mean(grad) for grad, var in gen_gv])
+    def multi_tower_gradients(self):
+        gen_grads = []
+        dsc_grads = []
 
-        tf.summary.scalar('Mean Discriminator Gradients', dsc_mean_grads, collections=['dsc-summaries'])
-        tf.summary.scalar('Mean Generator Gradients', gen_mean_grads, collections=['gen-summaries'])
+        gen_losses = []
+        dsc_losses = []
 
+        gen_images = []
+
+        with tf.variable_scope('waifunet'):
+            for i in range(self.args.n_gpus):
+                with tf.device("/gpu:{:d}".format(i)):
+                    grads, losses, nets = self.per_tower_ops()
+
+                    tf.get_variable_scope().reuse_variables()
+
+                    gen_grads.append(grads['gen'])
+                    dsc_grads.append(grads['dsc'])
+
+                    gen_losses.append(losses['gen'])
+                    dsc_losses.append(losses['dsc'])
+
+                    gen_images.append(nets['gen'].out)
+
+        # Now average gradients across all towers:
+        self.gen_grads = self.average_gradients(gen_grads)
+        self.dsc_grads = self.average_gradients(dsc_grads)
+
+        # And average losses across all towers
+        self.gen_loss = tf.reduce_mean(gen_losses)
+        self.dsc_loss = tf.reduce_mean(dsc_loss)
+
+        self.gen_images = gen_images
+
+    def single_tower_gradients(self):
+        with tf.variable_scope('waifunet'):
+            grads, losses, nets = self.per_tower_ops()
+            self.gen_grads = grads['gen']
+            self.dsc_grads = grads['dsc']
+
+            self.gen_loss = losses['gen']
+            self.dsc_loss = losses['dsc']
+
+            self.gen_images = [nets['gen'].out]
+
+    def training_ops(self):
         global_step = tf.contrib.framework.get_or_create_global_step()
 
-        dsc_apply_grads = dsc_optimizer.apply_gradients(dsc_gv, global_step=global_step)
-        self.gen_train = gen_optimizer.apply_gradients(gen_gv, global_step=global_step)
+        gen_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='Generator')
+        dsc_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='Discriminator')
 
-        if args.wasserstein:
-            debug_print("[WaifuNet] Creating Wasserstein critic network weight clipping ops...")
+        with tf.control_dependencies(gen_update_ops):
+            self.gen_train = self.optimizer.apply_gradients(self.gen_grads, global_step=global_step)
 
-            # add ops to clip the critic/discriminator network weights-- this must happen AFTER weights are updated
+        with tf.control_dependencies(dsc_update_ops):
+            dsc_apply_grads = self.optimizer.apply_gradients(self.dsc_grads, global_step=global_step)
+
+        if self.args.wasserstein:
             with tf.control_dependencies([dsc_apply_grads]):
-                clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in self.dsc_vars]
-                weight_clip_op = tf.group(*clipped_weights)
-                self.dsc_train = weight_clip_op
+                dsc_vars = slim.get_trainable_variables(scope='Discriminator')
+                clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in dsc_vars]
+                self.dsc_train = tf.group(*clipped_weights)
         else:
             self.dsc_train = dsc_apply_grads
+
+    def summary_ops(self):
+        tf.summary.scalar('Mean Generator Loss', self.gen_loss, collections=['gen-summaries'])
+        tf.summary.histogram('Generator Gradients', self.gen_grads, collections=['gen-summaries'])
+        tf.summary.image('Generator Output', self.gen_images[0], collections=['gen-summaries'])
+
+        tf.summary.scalar('Mean Discriminator Loss', self.dsc_loss, collections=['dsc-summaries'])
+        tf.summary.histogram('Discriminator Gradients', self.dsc_grads, collections=['dsc-summaries'])
 
         self.gen_summaries = tf.summary.merge_all(key='gen-summaries')
         self.dsc_summaries = tf.summary.merge_all(key='dsc-summaries')
 
-    def wasserstein_gan_loss(self):
+    def average_gradients(self, tower_grads):
+        average_grads = []
+        for gv in zip(*tower_grads):
+            grads = []
+            var = gv[0][1]
+
+            for grad, _ in gv:
+                grads.append(tf.expand_dims(grad, 0))
+
+            avg_grad = tf.concat(grads, axis=0)
+            avg_grad = tf.reduce_mean(grads, axis=0)
+
+            average_grads.append( (avg_grad, var) )
+
+        return average_grads
+
+    def per_tower_ops(self):
+        gen = Generator(args, noise_in, labels_in)
+        fake_image = gen.build()
+
+        dsc_fake_net = Discriminator(args, fake_image, self.labels)
+        dsc_real_net = Discriminator(args, self.samples[0], self.samples[1])
+
+        dsc_fake = dsc_fake_net.build()
+        dsc_real = dsc_real_net.build(reuse=True)
+
+        if not self.args.wasserstein:
+            dsc_mismatch_net = Discriminator(args, self.mismatched[0], self.mismatched[1])
+            dsc_mismatch = dsc_mismatch_net.build(reuse=True)
+
+            gen_loss, dsc_loss = self.standard_gan_loss(dsc_fake, dsc_real, dsc_mismatch)
+        else:
+            dsc_mismatch_net = None
+            gen_loss, dsc_loss = self.wasserstein_gan_loss(dsc_fake, dsc_real)
+
+        gen_grads = self.optimizer.compute_gradients(gen_loss, var_list=gen.vars)
+        dsc_grads = self.optimizer.compute_gradients(dsc_loss, var_list=dsc_fake_net.vars)
+
+        nets   = {'gen': gen, 'dsc_fake': dsc_fake_net, 'dsc_real': dsc_real_net, 'dsc_mismatch': dsc_mismatch_net}
+        grads  = {'dsc': dsc_loss, 'gen': gen_loss}
+        losses = {'dsc': dsc_loss, 'gen': gen_loss}
+
+        return grads, losses, nets
+
+    def wasserstein_gan_loss(self, dsc_fake_out, dsc_real_out):
         debug_print("[WaifuNet] Creating Wasserstein GAN loss ops...")
 
-        critic_real_mean = tf.reduce_mean(self.dsc_sample_out)
-        critic_fake_mean = tf.reduce_mean(self.dsc_fake_out)
+        critic_real_mean = tf.reduce_mean(dsc_real_out)
+        critic_fake_mean = tf.reduce_mean(dsc_fake_out)
 
-        self.dsc_loss = critic_real_mean - critic_fake_mean
-        self.gen_loss = critic_fake_mean
+        dsc_loss = critic_real_mean - critic_fake_mean
+        gen_loss = critic_fake_mean
 
-    def standard_gan_loss(self, sample_batch, mismatched_batch):
+        return gen_loss, dsc_loss
+
+    def standard_gan_loss(self, dsc_fake_out, dsc_real_out, dsc_mismatch_out):
         debug_print("[WaifuNet] Creating standard GAN loss ops...")
 
         # Discriminator outputs probability that sample came from training dataset
         batch_size = self.dsc_fake_out.shape.as_list()[0]
-        self.dsc_fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_fake_out,
+        dsc_fake_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=dsc_fake_out,
             labels=tf.random_uniform([self.args.batch_size], minval=0.0, maxval=0.3),#tf.zeros_like(self.dsc_fake_out),
             name='discriminator-fake-loss'
         ))
 
-        tf.summary.scalar('Discriminator Fake Loss', self.dsc_fake_loss, collections=['dsc-summaries'])
-
-        self.dsc_sample_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_sample_out,
-            labels=sample_batch[2],
+        dsc_sample_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=dsc_real_out,
+            labels=self.samples[2],
             name='discriminator-sample-loss'
         ))
 
-        tf.summary.scalar('Discriminator Real Loss', self.dsc_sample_loss, collections=['dsc-summaries'])
-
-        self.dsc_mismatch_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_mismatch_out,
-            labels=mismatched_batch[2],
+        dsc_mismatch_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=dsc_mismatch_out,
+            labels=self.mismatched[2],
             name='discriminator-mismatch-loss'
         ))
 
-        tf.summary.scalar('Discriminator Mismatched Loss', self.dsc_mismatch_loss, collections=['dsc-summaries'])
-
-        # NOTE: maybe also add image total variation to generator loss?
-        self.gen_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=self.dsc_fake_out,
+        gen_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=dsc_fake_out,
             labels=tf.random_uniform([self.args.batch_size], minval=0.7, maxval=1.2),#tf.ones_like(self.dsc_fake_out),
             name='generator-loss'
         ))
 
-        self.dsc_loss = self.dsc_fake_loss + self.dsc_sample_loss + self.dsc_mismatch_loss
+        dsc_loss = dsc_fake_loss + dsc_sample_loss + dsc_mismatch_loss
 
-    def gen_activation_fn(self):
-        if self.args.gen_use_lrelu:
-            return leaky_relu
-        else:
-            return tf.nn.relu
-
-    def deception_module(self, tensor_in, output_depth, bottleneck_depth, name='Deception', reuse=False):
-        batch_size, layer_height, layer_width, layer_depth = tensor_in.shape.as_list()
-        output_height, output_width = layer_height * 2, layer_width * 2
-        head_depth = output_depth // 4
-
-        with tf.variable_scope(name):
-            with slim.arg_scope([slim.conv2d, slim.conv2d_transpose], activation_fn=self.gen_activation_fn(), reuse=reuse):
-                # 1x1 bottleneck layers + initial scaling
-                head_3x3 = slim.conv2d(tensor_in, bottleneck_depth, kernel_size=1, scope='Bottleneck_3x3')
-                head_5x5 = slim.conv2d(tensor_in, bottleneck_depth, kernel_size=1, scope='Bottleneck_5x5')
-                head_scale = tf.image.resize_nearest_neighbor(tensor_in, (output_height, output_width), scope='Resize_2x')
-
-                # Transposed conv layers and scale head bottlenecking
-                head_1x1 = slim.conv2d_transpose(tensor_in, head_depth, kernel_size=1, stride=2, scope='ConvT_1x1')
-                head_3x3 = slim.conv2d_transpose(head_3x3, head_depth, kernel_size=3, stride=2, scope='ConvT_3x3')
-                head_5x5 = slim.conv2d_transpose(head_5x5, head_depth, kernel_size=5, stride=2, scope='ConvT_5x5')
-                head_scale = slim.conv2d(head_scale, head_depth, kernel_size=1, scope='Bottleneck_2x')
-
-                # Reshape and depth-concatenate heads
-                head_1x1 = tf.reshape(head_1x1, [batch_size, output_height, output_width, head_depth])
-                head_3x3 = tf.reshape(head_3x3, [batch_size, output_height, output_width, head_depth])
-                head_5x5 = tf.reshape(head_5x5, [batch_size, output_height, output_width, head_depth])
-                head_scale = tf.reshape(head_scale, [batch_size, output_height, output_width, head_depth])
-
-                out = tf.concat([head_1x1, head_3x3, head_5x5, head_scale], axis=3)
-                out = tf.reshape(out, [batch_size, output_height, output_width, output_depth])
-
-                return out
-
-    # Z-vector: noise
-    # Y-vector: tags / labels
-    def generator(self, z, y, reuse=False):
-        with slim.arg_scope([slim.conv2d_transpose, slim.fully_connected], activation_fn=self.gen_activation_fn(), reuse=reuse):
-            # Concat Z and Y, then project to DeConv stack input size
-            gen_in = tf.concat([z, y], axis=1)
-
-            proj_depth = self.args.gen_filter_base * (2 ** self.args.gen_layers)
-            proj_height = conv_output_size(self.args.output_height, 2 ** (self.args.gen_layers + 1))
-            proj_width = conv_output_size(self.args.output_width, 2 ** (self.args.gen_layers + 1))
-
-            net = slim.fully_connected(gen_in, proj_depth * proj_height * proj_width, scope='input')
-            net = tf.reshape(net, [-1, proj_height, proj_width, proj_depth])
-
-            for layer_n in range(self.args.gen_layers):
-                n_filters = self.args.gen_filter_base * (2 ** (self.args.gen_layers - layer_n - 1))
-                net_h = conv_output_size(self.args.output_height, 2 ** (self.args.gen_layers - layer_n))
-                net_w = conv_output_size(self.args.output_width, 2 ** (self.args.gen_layers - layer_n))
-
-                net = slim.conv2d_transpose(net, n_filters,
-                    kernel_size=self.args.gen_kernel_size,
-                    stride=2,
-                    normalizer_fn=slim.batch_norm,
-                    normalizer_params={'is_training': True, 'fused': True},
-                    scope='conv{:d}'.format(layer_n+1)
-                )
-                net = tf.reshape(net, [-1, net_h, net_w, n_filters])
-
-            # Output layer:
-            net = slim.conv2d_transpose(net, 3, kernel_size=self.args.gen_kernel_size,
-                stride=2,
-                activation_fn=tf.tanh,
-                scope='output'
-            )
-            out = tf.reshape(net, [-1, self.args.output_height, self.args.output_width, 3])
-
-            return out
-
-    def discriminator(self, disc_in, labels, reuse=False):
-        with slim.arg_scope([slim.conv2d, slim.fully_connected], reuse=reuse, activation_fn=leaky_relu):
-            net = disc_in
-            batch_size, in_h, in_w, in_d = disc_in.shape.as_list()
-            for layer_n in range(self.args.dsc_layers):
-                net_h, net_w = conv_output_size(in_h, 2 ** (layer_n + 1)), conv_output_size(in_w, 2 ** (layer_n + 1))
-                n_filters = self.args.dsc_filter_base * (2 ** layer_n)
-
-                net = slim.conv2d(net, n_filters,
-                    kernel_size=self.args.dsc_kernel_size,
-                    stride=2,
-                    normalizer_fn=slim.batch_norm,
-                    normalizer_params={'is_training': True, 'fused': True},
-                    scope='conv{:d}'.format(layer_n+1),
-                )
-
-                net = tf.reshape(net, [-1, net_h, net_w, n_filters])
-
-            _, label_vector_sz = labels.shape.as_list()
-            _, net_h, net_w, net_d = net.shape.as_list()
-
-            net_area = net_h * net_w
-
-            # Use an FC layer to project the labels into a feature map
-            label_feat_map = slim.fully_connected(labels, net_area, scope='label_project')
-            label_feat_map = tf.reshape(label_feat_map, [batch_size, net_h, net_w, 1])
-
-            net = tf.concat([net, label_feat_map], axis=3)
-
-            # Alternatively, we can just feed it straight into the FC layer
-            # instead of going through this final 1x1 conv
-            n_filters = self.args.dsc_filter_base * (2 ** self.args.dsc_layers)
-            net = slim.conv2d(net,
-                n_filters,
-                kernel_size=1,
-                normalizer_fn=slim.batch_norm,
-                normalizer_params={'is_training': True, 'fused': True},
-                scope='conv{:d}'.format(self.args.dsc_layers+1),
-            )
-
-            net = tf.reshape(net, [batch_size, -1])
-            activation_fn = tf.sigmoid
-            if self.args.wasserstein:
-                activation_fn = None
-
-            out = slim.fully_connected(
-                net,
-                1,
-                activation_fn=activation_fn,
-                scope='output',
-            )
-
-            return out
+        return gen_loss, dsc_loss

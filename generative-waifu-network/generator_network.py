@@ -22,25 +22,28 @@ def generator_parameters(parser):
     parser.add_argument('--gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
     parser.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
 
-class GeneratorNet:
+class Generator:
     def __init__(self, args, noise_tensor, labels_tensor):
         self.args = args
         self.noise = noise_tensor
         self.labels = labels_tensor
 
-    def build(self, scope='Generator', reuse=False):
+    def build(self, scope='Generator', reuse=None):
         with tf.variable_scope(scope, reuse=reuse):
             net = self.input_layer(self.noise, self.labels)
 
             for layer in range(self.args.gen_layers):
                 current_layer_depth = self.args.gen_final_depth // (2 ** (self.args.gen_layers - layer - 1))
-                
+
                 if self.args.deception_modules:
                     net = self.deception_module(net, current_layer_depth, scope='Deception{:d}'.format(layer))
                 else:
                     net = self.standard_deconv_layer(net, current_layer_depth, scope='ConvT{:d}'.format(layer))
 
-            return self.output_layer(net)
+            self.out = self.output_layer(net)
+            
+        self.vars = slim.get_trainable_variables(scope=scope)
+        return self.out
 
     def activation_fn(self):
         if self.args.gen_activation == 'relu':

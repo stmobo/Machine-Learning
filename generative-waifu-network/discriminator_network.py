@@ -16,14 +16,15 @@ def discriminator_parameters(parser):
     parser.add_argument('--dsc-bottleneck-depth', type=int, default=64, help='Bottleneck layer depth for Inception modules')
     parser.add_argument('--dsc-layers', type=int, default=4, help='Number of discriminator conv layers (not including output layer)')
     parser.add_argument('--dsc-activation', help='Activation function to use for discriminator network')
+    parser.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
 
-class DiscriminatorNetwork:
+class Discriminator:
     def __init__(self, args, image_in, labels_in):
         self.args = args
         self.image = image_in
         self.labels = labels_in
 
-    def build(self, scope='Discriminator', reuse=False):
+    def build(self, scope='Discriminator', reuse=None):
         with tf.variable_scope(scope, reuse=reuse):
             net = self.input_layer(self.image, self.labels)
 
@@ -35,7 +36,10 @@ class DiscriminatorNetwork:
                 else:
                     net = self.conv_layer(net, current_layer_depth, scope='Conv{:d}'.format(layer))
 
-            return self.output_layer(net)
+            self.out = self.output_layer(net)
+
+        self.vars = slim.get_trainable_variables(scope=scope)
+        return self.out
 
     def activation_fn(self):
         if self.args.dsc_activation == 'relu':
@@ -54,6 +58,11 @@ class DiscriminatorNetwork:
 
     def network_arg_scope(self):
         return slim.arg_scope([slim.fully_connected, slim.conv2d, slim.conv2d_transpose], activation_fn=self.activation_fn(), weights_initializer=self.initializer_fn())
+
+    def clip_network_weights(self, apply_grad_ops):
+        with tf.control_dependencies([apply_grad_ops]):
+            clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in self.vars]
+            return tf.group(*clipped_weights)
 
     def inception_module(self, tensor_in, output_depth, scope='Inception'):
         batch_size, input_height, input_width, input_depth = tensor_in.shape.as_list()
@@ -113,14 +122,10 @@ class DiscriminatorNetwork:
         batch_size, input_height, input_width, input_depth = image_in.shape.as_list()
         flat_in = tf.reshape(tensor_in, [batch_size, -1])
 
-        activation_fn = tf.sigmoid
-        if self.args.wasserstein:
-            activation_fn = None
-
         out = slim.fully_connected(
             flat_in,
             1,
-            activation_fn=activation_fn,
+            activation_fn=None,
             scope='output',
         )
 
