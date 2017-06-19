@@ -7,7 +7,7 @@ import sys
 from common import *
 
 def training_parameters(parser):
-    parser.add_argument('--batch-size', type=int, default=16, help='Image batch size to use for training')
+    parser.add_argument('--batch-size', type=int, default=16, help='Image batch size to use for training (per GPU / tower)')
     parser.add_argument('--input-queue-capacity', type=int, default=1000, help='Number of images to prefetch for the input queue')
     parser.add_argument('--input-threads', type=int, default=4, help='Number of threads to use for input prefetching')
     parser.add_argument('--dsc-steps', type=int, default=1, help='Number of discriminator / critic training steps to run for every generator training step')
@@ -117,6 +117,8 @@ def do_training(args):
 
     debug_print("Creating main networks...")
     wnet = waifunet.waifunet(args, noise_batch, sample_batch[1], sample_batch, mismatch_batch)
+
+    return
 
     summ_writer = tf.summary.FileWriter(
         args.log_dir,

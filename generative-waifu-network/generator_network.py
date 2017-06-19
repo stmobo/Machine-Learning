@@ -12,12 +12,11 @@ def generator_parameters(parser):
     group = parser.add_argument_group('Generator Network Parameters', help='These parameters control the structure of the generator network.')
 
     group.add_argument('--deception-modules', action='store_true', help='Network will be built from Deception modules if true')
-    group.add_argument('--output-height', type=int, default=1024, help='Height of output images')
-    group.add_argument('--output-width', type=int, default=1024, help='Width of output images')
     group.add_argument('--gen-final-depth', type=int, default=64, help='Final number of generator deconv filters (before image output layer)')
     group.add_argument('--gen-bottleneck-depth', type=int, default=64, help='Bottleneck layer depth for Deception modules')
     group.add_argument('--gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
     group.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
+    group.add_argument('--gen-activation', help='Activation function to use for generator network')
 
 class Generator:
     def __init__(self, args, noise_tensor, labels_tensor):
