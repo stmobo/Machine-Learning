@@ -1,3 +1,6 @@
+import tensorflow as tf
+import sys
+
 def leaky_relu(tensor_in):
     return tf.maximum(tensor_in, tensor_in * 0.01)
 

@@ -18,6 +18,8 @@ def gen_image_processing(gan_out):
 def waifunet_parameters(parser):
     group = parser.add_argument_group('General WaifuNet Parameters')
 
+    group.add_argument('--wasserstein', action='store_true', help='If set, use est. Wasserstein distance for loss instead of standard GAN losses')
+
     group.add_argument('--z-size', type=int, default=256, help='Dimensionality of Z (noise) vectors')
     group.add_argument('--label-size', type=int, default=1000, help='Dimensionality of Y (tag) vectors')
     group.add_argument('--output-height', type=int, default=1024, help='Height of output images')
@@ -27,8 +29,6 @@ def waifunet_parameters(parser):
     group.add_argument('--learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
     group.add_argument('--beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
     group.add_argument('--n-gpus', type=int, default=1, help='Number of GPUs to use for training.')
-
-    return parser
 
 class waifunet(object):
     # Builds the model.

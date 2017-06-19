@@ -9,7 +9,7 @@ def leaky_relu(tensor_in):
     return tf.maximum(tensor_in, tensor_in * 0.01)
 
 def generator_parameters(parser):
-    group = parser.add_argument_group('Generator Network Parameters', help='These parameters control the structure of the generator network.')
+    group = parser.add_argument_group('Generator Network Parameters', description='These parameters control the structure of the generator network.')
 
     group.add_argument('--deception-modules', action='store_true', help='Network will be built from Deception modules if true')
     group.add_argument('--gen-final-depth', type=int, default=64, help='Final number of generator deconv filters (before image output layer)')

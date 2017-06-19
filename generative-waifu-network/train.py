@@ -1,10 +1,13 @@
 import tensorflow as tf
 import numpy as np
-import waifunet
 import configargparse
-
 import sys
+
+import waifunet
+import discriminator_network
+import generator_network
 from common import *
+
 
 def training_parameters(parser):
     parser.add_argument('--batch-size', type=int, default=16, help='Image batch size to use for training (per GPU / tower)')
@@ -141,6 +144,9 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--config', is_config_file=True, help='Configuration file path')
 
     waifunet.waifunet_parameters(parser)
+    generator_network.generator_parameters(parser)
+    discriminator_network.discriminator_parameters(parser)
+
     training_parameters(parser)
 
     args = parser.parse_args()
