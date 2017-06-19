@@ -3,20 +3,17 @@ import tensorflow.contrib.slim as slim
 import numpy as np
 import selu
 
-def leaky_relu(tensor_in):
-    return tf.maximum(tensor_in, tensor_in * 0.01)
-
-def conv_size_divide(dim, div):
-    return int(np.ceil(float(dim) / float(div)))
+from common import *
 
 def discriminator_parameters(parser):
-    parser.add_argument('--inception-modules', action='store_true', help='Discriminator network will be built from Inception modules if true')
+    group = parser.add_argument_group('Discriminator Network Parameters', description='These parameters control the structure of the discriminator / critic network.')
 
-    parser.add_argument('--dsc-final-depth', type=int, default=64, help='Final number of discirminator conv filters (before image output layer)')
-    parser.add_argument('--dsc-bottleneck-depth', type=int, default=64, help='Bottleneck layer depth for Inception modules')
-    parser.add_argument('--dsc-layers', type=int, default=4, help='Number of discriminator conv layers (not including output layer)')
-    parser.add_argument('--dsc-activation', help='Activation function to use for discriminator network')
-    parser.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
+    group.add_argument('--inception-modules', action='store_true', help='Discriminator network will be built from Inception modules if true')
+    group.add_argument('--dsc-final-depth', type=int, default=64, help='Final number of discirminator conv filters (before image output layer)')
+    group.add_argument('--dsc-bottleneck-depth', type=int, default=64, help='Bottleneck layer depth for Inception modules')
+    group.add_argument('--dsc-layers', type=int, default=4, help='Number of discriminator conv layers (not including output layer)')
+    group.add_argument('--dsc-activation', help='Activation function to use for discriminator network')
+    group.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
 
 class Discriminator:
     def __init__(self, args, image_in, labels_in):
@@ -66,7 +63,7 @@ class Discriminator:
 
     def inception_module(self, tensor_in, output_depth, scope='Inception'):
         batch_size, input_height, input_width, input_depth = tensor_in.shape.as_list()
-        output_height, output_width = conv_size_divide(input_height, 2), conv_size_divide(input_width, 2)
+        output_height, output_width = conv_output_size(input_height, 2), conv_output_size(input_width, 2)
 
         bottleneck_depth = self.args.dsc_bottleneck_depth
         head_depth = self.args.head_depth // 4
@@ -90,21 +87,23 @@ class Discriminator:
             head_5x5 = tf.reshape(head_5x5, [batch_size, output_height, output_width, head_depth])
 
             out = tf.concat([head_pool, head_1x1, head_3x3, head_5x5], axis=3)
+            out = slim.fused_batch_norm(out)
+
             return out
 
     def conv_layer(self, tensor_in, output_depth, scope='Conv'):
         batch_size, input_height, input_width, input_depth = tensor_in.shape.as_list()
-        output_height, output_width = conv_size_divide(input_height, 2), conv_size_divide(input_width, 2)
+        output_height, output_width = conv_output_size(input_height, 2), conv_output_size(input_width, 2)
 
         with slim.arg_scope(self.network_arg_scope()):
-            net = slim.conv2d(tensor_in, output_depth, kernel_size=3, stride=2, scope=scope)
+            net = slim.conv2d(tensor_in, output_depth, kernel_size=3, stride=2, normalizer_fn=slim.fused_batch_norm, scope=scope)
             net = tf.reshape(net, [batch_size, output_height, output_width, output_depth])
 
             return net
 
     def input_layer(self, image_in, labels_in):
         batch_size, input_height, input_width, input_depth = image_in.shape.as_list()
-        output_height, output_width = conv_size_divide(input_height, 2), conv_size_divide(input_width, 2)
+        output_height, output_width = conv_output_size(input_height, 2), conv_output_size(input_width, 2)
         output_depth = self.args.dsc_final_depth // (2 ** self.args.dsc_layers)
 
         with slim.arg_scope(self.network_arg_scope()):

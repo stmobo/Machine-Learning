@@ -3,24 +3,21 @@ import tensorflow.contrib.slim as slim
 import numpy as np
 
 import selu
+from common import *
 
 def leaky_relu(tensor_in):
     return tf.maximum(tensor_in, tensor_in * 0.01)
 
 def generator_parameters(parser):
-    parser.add_argument('--z-size', type=int, default=256, help='Dimensionality of Z (noise) vectors')
-    parser.add_argument('--label-size', type=int, default=1000, help='Dimensionality of Y (tag) vectors')
+    group = parser.add_argument_group('Generator Network Parameters', help='These parameters control the structure of the generator network.')
 
-    parser.add_argument('--deception-modules', action='store_true', help='Network will be built from Deception modules if true')
-
-    parser.add_argument('--output-height', type=int, default=1024, help='Height of output images')
-    parser.add_argument('--output-width', type=int, default=1024, help='Width of output images')
-
-    parser.add_argument('--gen-final-depth', type=int, default=64, help='Final number of generator deconv filters (before image output layer)')
-    parser.add_argument('--gen-bottleneck-depth', type=int, default=64, help='Bottleneck layer depth for Deception modules')
-
-    parser.add_argument('--gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
-    parser.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
+    group.add_argument('--deception-modules', action='store_true', help='Network will be built from Deception modules if true')
+    group.add_argument('--output-height', type=int, default=1024, help='Height of output images')
+    group.add_argument('--output-width', type=int, default=1024, help='Width of output images')
+    group.add_argument('--gen-final-depth', type=int, default=64, help='Final number of generator deconv filters (before image output layer)')
+    group.add_argument('--gen-bottleneck-depth', type=int, default=64, help='Bottleneck layer depth for Deception modules')
+    group.add_argument('--gen-layers', type=int, default=4, help='Number of generator deconv layers (not including output layer)')
+    group.add_argument('--gen-kernel-size', type=int, default=5, help='Height+Width of generator deconv layer kernels')
 
 class Generator:
     def __init__(self, args, noise_tensor, labels_tensor):
@@ -41,7 +38,7 @@ class Generator:
                     net = self.standard_deconv_layer(net, current_layer_depth, scope='ConvT{:d}'.format(layer))
 
             self.out = self.output_layer(net)
-            
+
         self.vars = slim.get_trainable_variables(scope=scope)
         return self.out
 
@@ -120,6 +117,8 @@ class Generator:
                 out = tf.concat([head_1x1, head_3x3, head_5x5, head_scale], axis=3)
                 out = tf.reshape(out, [batch_size, output_height, output_width, output_depth])
 
+                out = slim.fused_batch_norm(out)
+
                 return out
 
     def standard_deconv_layer(self, tensor_in, output_depth, scope='ConvT'):
@@ -130,7 +129,7 @@ class Generator:
             out = slim.conv2d_transpose(tensor_in, output_depth,
                 kernel_size=self.args.gen_kernel_size,
                 stride=2,
-                normalizer_fn=slim.fused_batch_norm
+                normalizer_fn=slim.fused_batch_norm,
                 scope=scope
             )
             out = tf.reshape(out, [batch_size, output_height, output_width, output_depth])

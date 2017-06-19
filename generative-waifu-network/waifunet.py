@@ -6,32 +6,7 @@ import sys
 
 from generator_network import *
 from discriminator_network import *
-
-def debug_print(line):
-    print(line)
-    sys.stdout.flush()
-
-def conv_output_size(dim_in, stride):
-    if isinstance(dim_in, tf.Dimension):
-        if dim_in.value is None:
-            raise ValueError("Dimension size unknown!")
-        dim_in = dim_in.value
-    return int(math.ceil(float(dim_in) / float(stride)))
-
-def leaky_relu(tensor_in):
-    return tf.maximum(tensor_in, tensor_in * 0.01)
-
-def dsc_image_preprocessing(args, img_file_in):
-    img_8u = tf.image.decode_png(img_file_in)
-    img_f32 = tf.image.convert_image_dtype(img_8u, tf.float32)
-
-    # Resize all images to match the generator's output dimensions
-    img_resized = tf.image.resize_bicubic(img_f32, (args.output_height, args.output_width))
-
-    # Scale all image values from range [0,1] to range [-1, 1] (same as TanH)
-    img_out = (img_resized * 2.0) - 1.0
-
-    return img_out
+from common import *
 
 def gen_image_processing(gan_out):
     # Scale image values from [-1, 1] to [0, 1] (TanH -> TF float32 image ranges)
@@ -49,6 +24,7 @@ def waifunet_parameters(parser):
     # Alternately: 5e-5 for Wasserstein GANs
     parser.add_argument('--learning-rate', type=float, default=2e-4, help='Learning rate for generator and discriminator networks')
     parser.add_argument('--beta1', type=float, default=0.5, help='Beta1 parameter for Adam optimizers (for both generator and discriminator)')
+    parser.add_argument('--n-gpus', type=int, default=1, help='Number of GPUs to use for training.')
 
     return parser
 
@@ -58,13 +34,8 @@ class waifunet(object):
     # 'z_size' [default 256]: Length / dimensionality of Z vector
     # 'label_size' [default 1000]: Length / dimensionality of Y vector
     # 'output_width', 'output_height' [default 1024 for both]: Dimension of generator output
-    # 'gen_filter_base' [default 64]: Final number of deconv filters (before output image layer)
-    # 'gen_layers' [default 4]: Number of deconv / frac-strided conv layers in the generator network (not including image output layer)
-    # 'gen_kernel_size', 'dsc_kernel_size' [default 5]: size of conv / deconv filter kernels
-    # 'dsc_filter_base' [default 64]: Initial number of conv filters
-    # 'dsc_layers' [default 5]: Number of conv layers (not including output flattening and sigmoid)
-    #
-    # 'learning_rate' [recommended value 2e-4]: Learning rate for Adam optimization
+
+    # 'learning_rate' [recommended value 2e-4]: Learning rate for Adam / RMSProp optimization
     # 'beta1' [recommended value 0.5]: Beta1 parameter for Adam optimization
     #
     # Input tensor parameters:
@@ -136,9 +107,9 @@ class waifunet(object):
         gen_losses = []
         dsc_losses = []
 
-        gen_images = []
+        self.gen_images = []
 
-        with tf.variable_scope('waifunet'):
+        with tf.variable_scope('WaifuNet'):
             for i in range(self.args.n_gpus):
                 with tf.device("/gpu:{:d}".format(i)):
                     grads, losses, nets = self.per_tower_ops()
@@ -151,7 +122,8 @@ class waifunet(object):
                     gen_losses.append(losses['gen'])
                     dsc_losses.append(losses['dsc'])
 
-                    gen_images.append(nets['gen'].out)
+                    gen_out = gen_image_processing(nets['gen'].out)
+                    self.gen_images.append(gen_out)
 
         # Now average gradients across all towers:
         self.gen_grads = self.average_gradients(gen_grads)
@@ -161,10 +133,8 @@ class waifunet(object):
         self.gen_loss = tf.reduce_mean(gen_losses)
         self.dsc_loss = tf.reduce_mean(dsc_loss)
 
-        self.gen_images = gen_images
-
     def single_tower_gradients(self):
-        with tf.variable_scope('waifunet'):
+        with tf.variable_scope('WaifuNet'):
             grads, losses, nets = self.per_tower_ops()
             self.gen_grads = grads['gen']
             self.dsc_grads = grads['dsc']
@@ -172,13 +142,14 @@ class waifunet(object):
             self.gen_loss = losses['gen']
             self.dsc_loss = losses['dsc']
 
-            self.gen_images = [nets['gen'].out]
+            gen_out = gen_image_processing(nets['gen'].out)
+            self.gen_images = [gen_out]
 
     def training_ops(self):
         global_step = tf.contrib.framework.get_or_create_global_step()
 
-        gen_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='Generator')
-        dsc_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='Discriminator')
+        gen_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='WaifuNet/Generator')
+        dsc_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='WaifuNet/Discriminator')
 
         with tf.control_dependencies(gen_update_ops):
             self.gen_train = self.optimizer.apply_gradients(self.gen_grads, global_step=global_step)
@@ -188,7 +159,7 @@ class waifunet(object):
 
         if self.args.wasserstein:
             with tf.control_dependencies([dsc_apply_grads]):
-                dsc_vars = slim.get_trainable_variables(scope='Discriminator')
+                dsc_vars = slim.get_trainable_variables(scope='WaifuNet/Discriminator')
                 clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in dsc_vars]
                 self.dsc_train = tf.group(*clipped_weights)
         else:

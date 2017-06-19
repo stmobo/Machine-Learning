@@ -4,6 +4,7 @@ import waifunet
 import configargparse
 
 import sys
+from common import *
 
 def training_parameters(parser):
     parser.add_argument('--batch-size', type=int, default=16, help='Image batch size to use for training')
@@ -86,44 +87,35 @@ def training_step(args, sess, summary_writer, wnet, global_step):
     write_summary = (global_step % args.summary_frequency == 0)
     trace_sessions = (global_step % args.trace_frequency == 0)
 
-    if trace_sessions:
-        run_meta = tf.RunMetadata()
-        run_opts = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-    else:
-        run_meta = None
-        run_opts = None
+    if write_summary:
+        debug_print("Starting step {}...".format(global_step))
 
     for dsc_step in range(args.dsc_steps):
+        dsc_summary, dsc_meta = wnet.dsc_training_step(sess, summaries=(write_summary and dsc_step == 0), trace=(trace_sessions and dsc_step == 0))
+
         if write_summary:
-            _, dsc_summary = sess.run([wnet.dsc_train, wnet.dsc_summaries], options=run_opts, run_metadata=run_meta)
             summary_writer.add_summary(dsc_summary, global_step=global_step)
-        else:
-            sess.run(wnet.dsc_train, options=run_opts, run_metadata=run_meta)
 
         if trace_sessions:
-            summary_writer.add_run_metadata(run_meta, "step-{:d}-d{:d}".format(global_step, dsc_step))
-            run_meta = tf.RunMetadata()
+            summary_writer.add_run_metadata(dsc_meta, "step-{:d}-dsc".format(global_step))
+
+    gen_summary, gen_meta = wnet.gen_training_step(sess, summaries=write_summary,  trace=trace_sessions)
 
     if write_summary:
-        _, gen_summary = sess.run([wnet.gen_train, wnet.gen_summaries], options=run_opts, run_metadata=run_meta)
-        summary_writer.add_summary(gen_summary, global_step=global_step)
-    else:
-        sess.run(wnet.gen_train, options=run_opts, run_metadata=run_meta)
+        debug_print("Completed step {}!".format(global_step))
 
-    print("Completed step {}!".format(global_step))
-    sys.stdout.flush()
+    if write_summary:
+        summary_writer.add_summary(gen_summary, global_step=global_step)
 
     if trace_sessions:
-        summary_writer.add_run_metadata(run_meta, "step-{:d}-gen".format(global_step))
+        summary_writer.add_run_metadata(gen_meta, "step-{:d}-gen".format(global_step))
         summary_writer.flush()
 
-
-
 def do_training(args):
-    print("Creating input pipeline...")
-    sys.stdout.flush()
-
+    debug_print("Creating input pipeline...")
     sample_batch, noise_batch, mismatch_batch = sample_pipeline(args)
+
+    debug_print("Creating main networks...")
     wnet = waifunet.waifunet(args, noise_batch, sample_batch[1], sample_batch, mismatch_batch)
 
     summ_writer = tf.summary.FileWriter(
@@ -131,12 +123,12 @@ def do_training(args):
         graph=tf.get_default_graph()
     )
 
+    debug_print("Launching graph...")
     with tf.train.MonitoredTrainingSession(
         checkpoint_dir=args.checkpoint_dir,
         save_summaries_steps=None,
     ) as mon_sess:
-        print("Created session!")
-        sys.stdout.flush()
+        debug_print("Created session!")
         step = 0
         while not mon_sess.should_stop():
             training_step(args, mon_sess, summ_writer, wnet, step)
