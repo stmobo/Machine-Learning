@@ -64,27 +64,13 @@ def sample_pipeline(args):
         shared_name='matched-input-queue'
     )
 
-    if not args.wasserstein:
-        shuffled_tags = tf.random_shuffle(sample_tags)
-        dsc_mismatch_label = tf.random_uniform([], minval=0.0, maxval=0.3)
-        mismatched_batch = tf.train.batch(
-            [sample_images, shuffled_tags, dsc_mismatch_label],
-            enqueue_many=True,
-            batch_size=args.batch_size,
-            capacity=args.input_queue_capacity,
-            num_threads=args.input_threads,
-            shared_name='mismatched-input-queue'
-        )
-    else:
-        mismatched_batch = None
-
     sample_batch = (sample_images, sample_tags, sample_labels)
 
     # Noise values are sampled from a (truncated) normal distribution
     # and must fall within the range [0, 1]
     noise_batch = tf.truncated_normal([args.batch_size, args.z_size], mean=0.5, stddev=0.25)
 
-    return sample_batch, noise_batch, mismatched_batch
+    return sample_batch, noise_batch
 
 def training_step(args, sess, summary_writer, wnet, global_step):
     write_summary = (global_step % args.summary_frequency == 0)
@@ -116,12 +102,12 @@ def training_step(args, sess, summary_writer, wnet, global_step):
 
 def do_training(args):
     debug_print("Creating input pipeline...")
-    sample_batch, noise_batch, mismatch_batch = sample_pipeline(args)
+    sample_batch, noise_batch = sample_pipeline(args)
 
     debug_print("Creating main networks...")
-    wnet = waifunet.waifunet(args, noise_batch, sample_batch[1], sample_batch, mismatch_batch)
+    wnet = waifunet.waifunet(args, noise_batch, sample_batch[1], sample_batch)
 
-    return
+    return # debugging only
 
     summ_writer = tf.summary.FileWriter(
         args.log_dir,
