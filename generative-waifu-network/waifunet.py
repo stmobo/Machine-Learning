@@ -157,15 +157,7 @@ class waifunet(object):
             self.gen_train = self.optimizer.apply_gradients(self.gen_grads, global_step=global_step)
 
         with tf.control_dependencies(dsc_update_ops):
-            dsc_apply_grads = self.optimizer.apply_gradients(self.dsc_grads, global_step=global_step)
-
-        if self.args.wasserstein:
-            with tf.control_dependencies([dsc_apply_grads]):
-                dsc_vars = slim.get_trainable_variables(scope='WaifuNet/Discriminator')
-                clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in dsc_vars]
-                self.dsc_train = tf.group(*clipped_weights)
-        else:
-            self.dsc_train = dsc_apply_grads
+            self.dsc_train = self.optimizer.apply_gradients(self.dsc_grads, global_step=global_step)
 
     def summary_ops(self):
         tf.summary.scalar('Mean Generator Loss', self.gen_loss, collections=['gen-summaries'])
@@ -195,28 +187,41 @@ class waifunet(object):
         return average_grads
 
     def per_tower_ops(self):
-        gen = Generator(args, noise_in, labels_in)
+        gen = Generator(args, self.noise, self.labels)
         fake_image = gen.build()
 
-        dsc_fake_net = Discriminator(args, fake_image, self.labels)
-        dsc_real_net = Discriminator(args, self.samples[0], self.samples[1])
+        dsc_fake_net = Discriminator(args, fake_image)
+        dsc_real_net = Discriminator(args, self.samples[0])
 
-        dsc_fake = dsc_fake_net.build()
-        dsc_real = dsc_real_net.build(reuse=True)
+        dsc_fake, pred_labels_fake = dsc_fake_net.build()
+        dsc_real, pred_labels_real = dsc_real_net.build(reuse=True)
 
         if not self.args.wasserstein:
-            dsc_mismatch_net = Discriminator(args, self.mismatched[0], self.mismatched[1])
-            dsc_mismatch = dsc_mismatch_net.build(reuse=True)
-
             gen_loss, dsc_loss = self.standard_gan_loss(dsc_fake, dsc_real, dsc_mismatch)
         else:
-            dsc_mismatch_net = None
             gen_loss, dsc_loss = self.wasserstein_gan_loss(dsc_fake, dsc_real)
+
+        # Labeling losses for generator and discriminator
+        xentropy_fake = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=pred_labels_fake)
+        xentropy_real = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.samples[1], logits=pred_labels_real)
+
+        gen_loss += xentropy_fake
+        dsc_loss += xentropy_real
+
+        # For WGANs, add an input-gradient norm term to the loss
+        if self.args.wasserstein:
+            grad_norms_fake = dsc_fake_net.input_gradient_norms()
+            grad_norms_real = dsc_real_net.input_gradient_norms()
+
+            fake_norm_loss = tf.square(grad_norms_fake - 1)
+            real_norm_loss = tf.square(grad_norms_real - 1)
+
+            dsc_loss += tf.reduce_mean([fake_norm_loss, real_norm_loss])
 
         gen_grads = self.optimizer.compute_gradients(gen_loss, var_list=gen.vars)
         dsc_grads = self.optimizer.compute_gradients(dsc_loss, var_list=dsc_fake_net.vars)
 
-        nets   = {'gen': gen, 'dsc_fake': dsc_fake_net, 'dsc_real': dsc_real_net, 'dsc_mismatch': dsc_mismatch_net}
+        nets   = {'gen': gen, 'dsc_fake': dsc_fake_net, 'dsc_real': dsc_real_net}
         grads  = {'dsc': dsc_loss, 'gen': gen_loss}
         losses = {'dsc': dsc_loss, 'gen': gen_loss}
 
@@ -233,7 +238,7 @@ class waifunet(object):
 
         return gen_loss, dsc_loss
 
-    def standard_gan_loss(self, dsc_fake_out, dsc_real_out, dsc_mismatch_out):
+    def standard_gan_loss(self, dsc_fake_out, dsc_real_out):
         debug_print("[WaifuNet] Creating standard GAN loss ops...")
 
         # Discriminator outputs probability that sample came from training dataset
@@ -250,18 +255,12 @@ class waifunet(object):
             name='discriminator-sample-loss'
         ))
 
-        dsc_mismatch_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=dsc_mismatch_out,
-            labels=self.mismatched[2],
-            name='discriminator-mismatch-loss'
-        ))
-
         gen_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
             logits=dsc_fake_out,
             labels=tf.random_uniform([self.args.batch_size], minval=0.7, maxval=1.2),#tf.ones_like(self.dsc_fake_out),
             name='generator-loss'
         ))
 
-        dsc_loss = dsc_fake_loss + dsc_sample_loss + dsc_mismatch_loss
+        dsc_loss = dsc_fake_loss + dsc_sample_loss
 
         return gen_loss, dsc_loss

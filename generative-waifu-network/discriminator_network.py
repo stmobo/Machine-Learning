@@ -17,10 +17,9 @@ def discriminator_parameters(parser):
     group.add_argument('--dsc-normalizer', help='Normalization function to use in network layers (valid values are \'batch\', \'layer\', \'none\')')
 
 class Discriminator:
-    def __init__(self, args, image_in, labels_in):
+    def __init__(self, args, image_in):
         self.args = args
         self.image = image_in
-        self.labels = labels_in
 
     def build(self, scope='Discriminator', reuse=None):
         with tf.variable_scope(scope, reuse=reuse):
@@ -34,10 +33,10 @@ class Discriminator:
                 else:
                     net = self.conv_layer(net, current_layer_depth, scope='Conv{:d}'.format(layer))
 
-            self.out = self.output_layer(net)
+            self.critic, self.pred_labels = self.output_layer(net)
 
         self.vars = slim.get_trainable_variables(scope=scope)
-        return self.out
+        return self.critic, self.pred_labels
 
     def activation_fn(self):
         if self.args.dsc_activation == 'relu':
@@ -73,7 +72,7 @@ class Discriminator:
 
     def input_gradient_norms(self):
         input_grads = tf.gradients(self.out, self.image, name='dsc-input-gradients')
-        self.grad_norm = tf.norm(input_grads, axis=(1,2)) # Note: Compute norms over height and width (axes 1,2 for NHWC and 2,3 for NCHW)
+        return tf.norm(input_grads, axis=(1,2)) # Note: Compute norms over height and width (axes 1,2 for NHWC and 2,3 for NCHW)
 
     def inception_module(self, tensor_in, output_depth, scope='Inception'):
         batch_size, input_height, input_width, input_depth = tensor_in.shape.as_list()
@@ -127,10 +126,10 @@ class Discriminator:
             net = slim.conv2d(image_in, output_depth, kernel_size=3, scope='Input-Conv1')
             net = slim.conv2d(net, output_depth, kernel_size=3, stride=2, scope='Input-Conv2')
 
-            projected_labels = slim.fully_connected(labels_in, output_height * output_width, scope='LabelProjection')
-            projected_labels = tf.reshape(projected_labels, [batch_size, output_height, output_width, 1])
+            # projected_labels = slim.fully_connected(labels_in, output_height * output_width, scope='LabelProjection')
+            # projected_labels = tf.reshape(projected_labels, [batch_size, output_height, output_width, 1])
 
-            net = tf.concat([net, projected_labels], axis=3)
+            # net = tf.concat([net, projected_labels], axis=3)
 
             return net
 
@@ -138,11 +137,18 @@ class Discriminator:
         batch_size, input_height, input_width, input_depth = image_in.shape.as_list()
         flat_in = tf.reshape(tensor_in, [batch_size, -1])
 
-        out = slim.fully_connected(
+        critic_out = slim.fully_connected(
             flat_in,
             1,
             activation_fn=None,
-            scope='output',
+            scope='Critic',
         )
 
-        return out
+        labels_out = slim.fully_connected(
+            flat_in,
+            self.args.label_size,
+            activation_fn=None,
+            scope='PredLabels',
+        )
+
+        return critic_out, labels_out
