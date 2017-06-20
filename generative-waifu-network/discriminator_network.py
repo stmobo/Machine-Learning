@@ -14,6 +14,7 @@ def discriminator_parameters(parser):
     group.add_argument('--dsc-layers', type=int, default=4, help='Number of discriminator conv layers (not including output layer)')
     group.add_argument('--dsc-activation', help='Activation function to use for discriminator network')
     group.add_argument('--dsc-weight-clip', type=float, default=1e-2, help='Critic network weight clipping values (for Wasserstein GANs)')
+    group.add_argument('--dsc-normalizer', help='Normalization function to use in network layers (valid values are \'batch\', \'layer\', \'none\')')
 
 class Discriminator:
     def __init__(self, args, image_in, labels_in):
@@ -53,6 +54,15 @@ class Discriminator:
         else:
             return selu.initializer
 
+    def normalizer_fn(self):
+        if self.args.dsc_normalizer == 'batch':
+            return slim.fused_batch_norm
+        elif self.args.dsc_normalizer == 'layer':
+            return slim.layer_norm
+        elif self.args.dsc_normalizer == 'none':
+            return None
+        raise ValueError("Invalid value for --dsc-normalizer: " + self.args.dsc_normalizer)
+
     def network_arg_scope(self):
         return slim.arg_scope([slim.fully_connected, slim.conv2d, slim.conv2d_transpose], activation_fn=self.activation_fn(), weights_initializer=self.initializer_fn())
 
@@ -60,6 +70,10 @@ class Discriminator:
         with tf.control_dependencies([apply_grad_ops]):
             clipped_weights = [tf.clip_by_value(w, -args.dsc_weight_clip, args.dsc_weight_clip) for w in self.vars]
             return tf.group(*clipped_weights)
+
+    def input_gradient_norms(self):
+        input_grads = tf.gradients(self.out, self.image, name='dsc-input-gradients')
+        self.grad_norm = tf.norm(input_grads, axis=(1,2)) # Note: Compute norms over height and width (axes 1,2 for NHWC and 2,3 for NCHW)
 
     def inception_module(self, tensor_in, output_depth, scope='Inception'):
         batch_size, input_height, input_width, input_depth = tensor_in.shape.as_list()
@@ -87,7 +101,10 @@ class Discriminator:
             head_5x5 = tf.reshape(head_5x5, [batch_size, output_height, output_width, head_depth])
 
             out = tf.concat([head_pool, head_1x1, head_3x3, head_5x5], axis=3)
-            out = slim.fused_batch_norm(out)
+
+            norm_fn = self.normalizer_fn()
+            if norm_fn is not None:
+                out = norm_fn(out)
 
             return out
 
@@ -96,7 +113,7 @@ class Discriminator:
         output_height, output_width = conv_output_size(input_height, 2), conv_output_size(input_width, 2)
 
         with slim.arg_scope(self.network_arg_scope()):
-            net = slim.conv2d(tensor_in, output_depth, kernel_size=3, stride=2, normalizer_fn=slim.fused_batch_norm, scope=scope)
+            net = slim.conv2d(tensor_in, output_depth, kernel_size=3, stride=2, normalizer_fn=self.normalizer_fn(), scope=scope)
             net = tf.reshape(net, [batch_size, output_height, output_width, output_depth])
 
             return net
